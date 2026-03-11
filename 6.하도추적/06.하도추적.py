@@ -341,6 +341,7 @@ class NetworkCanvas(tk.Canvas):
         self._zoom       = 1.0
         self._world_bbox = (0, 0, 3000, 1200)
         self._pan_last   = None
+        self._snap_on    = True
 
         self.bind('<Button-1>',        self._click)
         self.bind('<B1-Motion>',       self._drag)
@@ -603,8 +604,12 @@ class NetworkCanvas(tk.Canvas):
         if self._drag_start and self._sel_node:
             z = self._zoom
             x, y = self._cx(event.x) / z, self._cy(event.y) / z
-            self._sel_node.x = self._drag_start[2] + (x - self._drag_start[0])
-            self._sel_node.y = self._drag_start[3] + (y - self._drag_start[1])
+            nx = self._drag_start[2] + (x - self._drag_start[0])
+            ny = self._drag_start[3] + (y - self._drag_start[1])
+            if self._snap_on:
+                nx, ny = self._snap(nx), self._snap(ny)
+            self._sel_node.x = nx
+            self._sel_node.y = ny
             self.redraw()
 
     def _release(self, event):
@@ -688,6 +693,8 @@ class NetworkCanvas(tk.Canvas):
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _place_node(self, ntype, x, y):
+        if self._snap_on:
+            x, y = self._snap(x), self._snap(y)
         count = sum(1 for n in self.nodes.values() if n.type == ntype) + 1
         prefix = {'SUBBASIN': 'SB', 'REACH': 'RC', 'JUNCTION': 'JN', 'OUTLET': 'OUT'}
         name = f"{prefix.get(ntype,'ND')}{count:02d}"
@@ -696,6 +703,10 @@ class NetworkCanvas(tk.Canvas):
         self._sel_node = node
         self._sel_edge = None
         self.redraw()
+
+    def _snap(self, v):
+        """Snap world coordinate to nearest grid point."""
+        return round(v / self.GRID) * self.GRID
 
     def _create_edge(self, src_id, dst_id, src_dir=None, dst_dir=None):
         if any(e.src == src_id and e.dst == dst_id for e in self.edges.values()):
@@ -1255,6 +1266,12 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                           font=FONT_SMALL, height=30, width=100,
                           fg_color=col).pack(side='right', padx=4, pady=6)
 
+        self._snap_btn = ctk.CTkButton(
+            toolbar, text='스냅 ●', command=self._toggle_snap,
+            font=FONT_SMALL, height=30, width=80,
+            fg_color='#1a6b9a', hover_color='#2980b9')
+        self._snap_btn.pack(side='right', padx=4, pady=6)
+
         # Right properties
         self._props = PropertiesPanel(self,
                                       redraw_cb=self._canvas.redraw,
@@ -1279,6 +1296,13 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         }
         self._mode_lbl.configure(text=f'모드: {label_map.get(ntype, ntype)}')
         self._canvas.focus_set()
+
+    def _toggle_snap(self):
+        self._canvas._snap_on = not self._canvas._snap_on
+        if self._canvas._snap_on:
+            self._snap_btn.configure(text='스냅 ●', fg_color='#1a6b9a')
+        else:
+            self._snap_btn.configure(text='스냅 ○', fg_color='#444466')
 
     def _node_selected(self, node):
         self._props.show_node(node)
