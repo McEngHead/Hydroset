@@ -397,7 +397,8 @@ class NetworkCanvas(tk.Canvas):
             self.create_line(x0, y, x1, y, fill='#1e1e30', width=1)
 
     def _draw_edges(self):
-        z = self._zoom
+        z  = self._zoom
+        CR = max(6, int(8 * z))
         for edge in self.edges.values():
             src = self.nodes.get(edge.src)
             dst = self.nodes.get(edge.dst)
@@ -410,11 +411,7 @@ class NetworkCanvas(tk.Canvas):
             sel = self._sel_edge and self._sel_edge.id == edge.id
             col = '#f39c12' if sel else '#3498db'
             lw  = 2 if sel else 1
-            cp1, cp2 = self._bezier_cps(x1, y1, sd, x2, y2, dd)
-            self.create_line(x1, y1, cp1[0], cp1[1], cp2[0], cp2[1], x2, y2,
-                             smooth=True, fill=col, width=lw,
-                             arrow=tk.LAST, arrowshape=(7, 9, 3),
-                             tags=f'edge_{edge.id}')
+            self._draw_ortho_edge(x1, y1, sd, x2, y2, dd, col, lw, f'edge_{edge.id}', CR)
 
     def _draw_nodes(self):
         for node in self.nodes.values():
@@ -510,6 +507,85 @@ class NetworkCanvas(tk.Canvas):
         DY = {'E': 0, 'W':  0, 'N':-1, 'S': 1}
         return ((x1 + DX[d1]*off, y1 + DY[d1]*off),
                 (x2 + DX[d2]*off, y2 + DY[d2]*off))
+
+    # ── orthogonal edge routing ───────────────────────────────────────────────
+    _ARC_P = {                              # corner arc (start_angle, extent)
+        ('E','S'):(180, 90), ('E','N'):(180,-90),
+        ('W','S'):(0,  -90), ('W','N'):(0,   90),
+        ('S','E'):(90, -90), ('S','W'):(90,  90),
+        ('N','E'):(270, 90), ('N','W'):(270,-90),
+    }
+
+    @staticmethod
+    def _ortho_wpts(x1, y1, dep, x2, y2, arr):
+        """Return orthogonal waypoints: L-shape, Z-shape, or U-shape."""
+        OPP = {'E':'W','W':'E','N':'S','S':'N'}
+        H   = {'E','W'}
+        if dep == arr:                    # same travel direction → Z or straight
+            if dep in H:
+                if abs(y1-y2) < 1: return [(x1,y1),(x2,y2)]
+                mid = (x1+x2)/2
+                return [(x1,y1),(mid,y1),(mid,y2),(x2,y2)]
+            else:
+                if abs(x1-x2) < 1: return [(x1,y1),(x2,y2)]
+                mid = (y1+y2)/2
+                return [(x1,y1),(x1,mid),(x2,mid),(x2,y2)]
+        if dep == OPP[arr]:               # opposite directions → U-shape
+            EXT = 80
+            if dep in H:
+                mx = (max(x1,x2)+EXT) if dep=='E' else (min(x1,x2)-EXT)
+                return [(x1,y1),(mx,y1),(mx,y2),(x2,y2)]
+            else:
+                my = (max(y1,y2)+EXT) if dep=='S' else (min(y1,y2)-EXT)
+                return [(x1,y1),(x1,my),(x2,my),(x2,y2)]
+        # perpendicular → L-shape (1 corner)
+        if dep in H:
+            return [(x1,y1),(x2,y1),(x2,y2)]
+        return [(x1,y1),(x1,y2),(x2,y2)]
+
+    def _stroke_ortho(self, pts, CR, col, lw, tag):
+        """Draw straight segments with rounded arc corners through waypoints."""
+        n = len(pts)
+        if n < 2: return
+        DV = {'E':(1,0),'W':(-1,0),'N':(0,-1),'S':(0,1)}
+
+        def dof(i):
+            ax,ay = pts[i]; bx,by = pts[i+1]
+            dx,dy = bx-ax, by-ay
+            return ('E' if dx>=0 else 'W') if abs(dx)>=abs(dy) else ('S' if dy>=0 else 'N')
+
+        dirs = [dof(i) for i in range(n-1)]
+        cx, cy = pts[0]
+        for i in range(n-1):
+            bx, by = pts[i+1]
+            d = dirs[i]
+            is_last = (i == n-2)
+            if is_last:
+                if abs(cx-bx)>0.1 or abs(cy-by)>0.1:
+                    self.create_line(cx,cy,bx,by, fill=col, width=lw,
+                                     arrow=tk.LAST, arrowshape=(7,9,3), tags=tag)
+            else:
+                d_next = dirs[i+1]
+                seg_len = abs(pts[i+1][0]-pts[i][0]) + abs(pts[i+1][1]-pts[i][1])
+                r = min(CR, seg_len/2)
+                dvx,dvy = DV[d]
+                ex,ey = bx - dvx*r, by - dvy*r
+                if abs(cx-ex)>0.1 or abs(cy-ey)>0.1:
+                    self.create_line(cx,cy,ex,ey, fill=col, width=lw, tags=tag)
+                key = (d, d_next)
+                if key in self._ARC_P:
+                    start, extent = self._ARC_P[key]
+                    self.create_arc(bx-r, by-r, bx+r, by+r,
+                                    start=start, extent=extent,
+                                    style=tk.ARC, outline=col, width=lw, tags=tag)
+                dvx2,dvy2 = DV[d_next]
+                cx,cy = bx + dvx2*r, by + dvy2*r
+
+    def _draw_ortho_edge(self, x1, y1, d1, x2, y2, d2, col, lw, tag, CR):
+        OPP = {'E':'W','W':'E','N':'S','S':'N'}
+        arr = OPP[d2]
+        pts = self._ortho_wpts(x1, y1, d1, x2, y2, arr)
+        self._stroke_ortho(pts, CR, col, lw, tag)
 
     # ── events ───────────────────────────────────────────────────────────────
 
