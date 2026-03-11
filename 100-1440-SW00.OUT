@@ -1,0 +1,840 @@
+1*****************************************                                                   ***************************************
+ *                                       *                                                   *                                     *
+ *   FLOOD HYDROGRAPH PACKAGE  (HEC-1)   *                                                   *    U.S. ARMY CORPS OF ENGINEERS     *
+ *               JUN   1998              *                                                   *    HYDROLOGIC ENGINEERING CENTER    *
+ *            VERSION 4.1                *                                                   *          609 SECOND STREET          *
+ *                                       *                                                   *       DAVIS, CALIFORNIA 95616       *
+ *  RUN DATE   26MAY22  TIME  19:56:06   *                                                   *           (916) 756-1104            *
+ *                                       *                                                   *                                     *
+ *****************************************                                                   ***************************************
+
+
+
+
+
+                                                 X     X  XXXXXXX   XXXXX           X 
+                                                 X     X  X        X     X         XX 
+                                                 X     X  X        X                X 
+                                                 XXXXXXX  XXXX     X        XXXXX   X 
+                                                 X     X  X        X                X 
+                                                 X     X  X        X     X          X 
+                                                 X     X  XXXXXXX   XXXXX          XXX
+
+
+
+
+            THIS PROGRAM REPLACES ALL PREVIOUS VERSIONS OF HEC-1 KNOWN AS HEC1 (JAN 73), HEC1GS, HEC1DB, AND HEC1KW.
+
+            THE DEFINITIONS OF VARIABLES -RTIMP- AND -RTIOR- HAVE CHANGED FROM THOSE USED WITH THE 1973-STYLE INPUT STRUCTURE.
+            THE DEFINITION OF -AMSKK- ON RM-CARD WAS CHANGED WITH REVISIONS DATED 28 SEP 81. THIS IS THE FORTRAN77 VERSION
+            NEW OPTIONS: DAMBREAK OUTFLOW SUBMERGENCE , SINGLE EVENT DAMAGE CALCULATION, DSS:WRITE STAGE FREQUENCY,
+            DSS:READ TIME SERIES AT DESIRED CALCULATION INTERVAL   LOSS RATE:GREEN AND AMPT INFILTRATION
+            KINEMATIC WAVE: NEW FINITE DIFFERENCE ALGORITHM
+
+
+1                                                       HEC-1 INPUT                                             PAGE  1
+
+           LINE           ID.......1.......2.......3.......4.......5.......6.......7.......8.......9......10
+
+              1           ID   Project(Flood)                                                               
+                          *DIAGRAM                                                                        
+              2           IM                                                                                
+              3           IO       5       1                                                                
+              4           IT      60 11JUL05    1800     300                                                
+              5           VS  SW00                                                                          
+              6           VV    2.11                                                                        
+                          *                                                                               
+ 
+              7           KK  MG24                                                                          
+              8           IN      60 11JUL05    1800                                                        
+              9           BA    79.9                                                                        
+             10           PB   279.3                                                                        
+             11           PC    .000    .000    .006    .029    .051    .071    .087    .103    .123    .150
+             12           PC    .188    .240    .306    .385    .475    .571    .667    .757    .836    .897
+             13           PC    .937    .957    .961    .960   1.000                                        
+             14           LS            89.8                                                                
+             15           UC    1.29    1.83                                                                
+                          *                                                                               
+ 
+             16           KK  MG23R                                                                         
+             17           RM       1     .63     .20                                                        
+                          *                                                                               
+ 
+             18           KK  XMG23                                                                         
+             19           IN      60 11JUL05    1800                                                        
+             20           BA    27.5                                                                        
+             21           PB   287.3                                                                        
+             22           PC    .000    .000    .005    .028    .051    .070    .086    .101    .120    .147
+             23           PC    .185    .236    .302    .381    .471    .568    .665    .756    .835    .896
+             24           PC    .936    .955    .958    .958   1.000                                        
+             25           LS            92.9                                                                
+             26           UC     .90    1.05                                                                
+                          *                                                                               
+ 
+             27           KK  MG23                                                                          
+             28           HC       2                                                                        
+                          *                                                                               
+ 
+             29           KK  MG18R                                                                         
+             30           RM       1     .34     .20                                                        
+                          *                                                                               
+ 
+             31           KK  XMG18                                                                         
+             32           IN      60 11JUL05    1800                                                        
+             33           BA    33.5                                                                        
+             34           PB   305.2                                                                        
+             35           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .135
+             36           PC    .170    .220    .286    .366    .458    .557    .656    .750    .830    .891
+             37           PC    .930    .948    .949    .948   1.000                                        
+             38           LS            91.7                                                                
+             39           UC    1.10    1.27                                                                
+                          *                                                                               
+1                                                       HEC-1 INPUT                                             PAGE  2
+
+           LINE           ID.......1.......2.......3.......4.......5.......6.......7.......8.......9......10
+
+ 
+             40           KK  MG18                                                                          
+             41           HC       2                                                                        
+                          *                                                                               
+ 
+             42           KK  GSC04                                                                         
+             43           IN      60 11JUL05    1800                                                        
+             44           BA    68.6                                                                        
+             45           PB   307.7                                                                        
+             46           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+             47           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+             48           PC    .930    .948    .949    .948   1.000                                        
+             49           LS            80.8                                                                
+             50           UC    1.54    2.54                                                                
+                          *                                                                               
+ 
+             51           KK  GSC00R                                                                        
+             52           RM       1     .65     .20                                                        
+                          *                                                                               
+ 
+             53           KK  XGSC00                                                                        
+             54           IN      60 11JUL05    1800                                                        
+             55           BA    77.1                                                                        
+             56           PB   310.9                                                                        
+             57           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+             58           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+             59           PC    .930    .948    .949    .948   1.000                                        
+             60           LS            86.9                                                                
+             61           UC    1.76    2.89                                                                
+                          *                                                                               
+ 
+             62           KK  GSC00                                                                         
+             63           HC       2                                                                        
+                          *                                                                               
+ 
+             64           KK  XMG17                                                                         
+             65           IN      60 11JUL05    1800                                                        
+             66           BA      .1                                                                        
+             67           PB   309.5                                                                        
+             68           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+             69           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+             70           PC    .930    .948    .949    .948   1.000                                        
+             71           LS            10.0                                                                
+             72           UC     .10     .18                                                                
+                          *                                                                               
+ 
+             73           KK  MG17                                                                          
+             74           HC       3                                                                        
+                          *                                                                               
+1                                                       HEC-1 INPUT                                             PAGE  3
+
+           LINE           ID.......1.......2.......3.......4.......5.......6.......7.......8.......9......10
+
+ 
+             75           KK  MG15R                                                                         
+             76           RM       1    1.53     .20                                                        
+                          *                                                                               
+ 
+             77           KK  XMG15                                                                         
+             78           IN      60 11JUL05    1800                                                        
+             79           BA    68.5                                                                        
+             80           PB   302.4                                                                        
+             81           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+             82           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+             83           PC    .930    .948    .949    .948   1.000                                        
+             84           LS            85.9                                                                
+             85           UC    1.87    3.06                                                                
+                          *                                                                               
+ 
+             86           KK  MG15                                                                          
+             87           HC       2                                                                        
+                          *                                                                               
+ 
+             88           KK  SYC00                                                                         
+             89           IN      60 11JUL05    1800                                                        
+             90           BA   152.7                                                                        
+             91           PB   287.7                                                                        
+             92           PC    .000    .000    .004    .028    .050    .069    .083    .097    .114    .138
+             93           PC    .175    .225    .291    .371    .462    .560    .659    .751    .831    .893
+             94           PC    .932    .950    .952    .951   1.000                                        
+             95           LS            87.8                                                                
+             96           UC    2.15    3.55                                                                
+                          *                                                                               
+ 
+             97           KK  XMG14                                                                         
+             98           IN      60 11JUL05    1800                                                        
+             99           BA      .1                                                                        
+            100           PB   309.5                                                                        
+            101           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+            102           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+            103           PC    .930    .948    .949    .948   1.000                                        
+            104           LS            10.0                                                                
+            105           UC     .10     .18                                                                
+                          *                                                                               
+ 
+            106           KK  MG14                                                                          
+            107           HC       3                                                                        
+                          *                                                                               
+ 
+            108           KK  MG13R                                                                         
+            109           RM       1     .48     .20                                                        
+                          *                                                                               
+1                                                       HEC-1 INPUT                                             PAGE  4
+
+           LINE           ID.......1.......2.......3.......4.......5.......6.......7.......8.......9......10
+
+ 
+            110           KK  XMG13                                                                         
+            111           IN      60 11JUL05    1800                                                        
+            112           BA    13.9                                                                        
+            113           PB   255.2                                                                        
+            114           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+            115           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+            116           PC    .930    .948    .949    .948   1.000                                        
+            117           LS            91.6                                                                
+            118           UC     .59    1.01                                                                
+                          *                                                                               
+ 
+            119           KK  MG13                                                                          
+            120           HC       2                                                                        
+                          *                                                                               
+ 
+            121           KK  JJC10                                                                         
+            122           IN      60 11JUL05    1800                                                        
+            123           BA    31.7                                                                        
+            124           PB   310.4                                                                        
+            125           PC    .000    .000    .005    .028    .050    .069    .084    .098    .115    .140
+            126           PC    .177    .228    .293    .373    .464    .562    .660    .752    .832    .893
+            127           PC    .933    .951    .954    .952   1.000                                        
+            128           LS            85.0                                                                
+            129           UC     .99    1.64                                                                
+                          *                                                                               
+ 
+            130           KK  SW01                                                                          
+            131           IN      60 11JUL05    1800                                                        
+            132           BA    26.0                                                                        
+            133           PB   289.8                                                                        
+            134           PC    .000    .000    .004    .028    .050    .069    .084    .097    .115    .140
+            135           PC    .176    .227    .292    .372    .463    .561    .660    .752    .832    .893
+            136           PC    .933    .951    .953    .952   1.000                                        
+            137           LS            88.9                                                                
+            138           UC     .71    1.02                                                                
+                          *                                                                               
+ 
+            139           KK  SW00R                                                                         
+            140           RM       1     .13     .20                                                        
+                          *                                                                               
+ 
+            141           KK  XSW00                                                                         
+            142           IN      60 11JUL05    1800                                                        
+            143           BA     2.9                                                                        
+            144           PB   314.2                                                                        
+            145           PC    .000    .000    .004    .027    .050    .068    .082    .095    .111    .134
+            146           PC    .170    .220    .286    .366    .458    .557    .656    .749    .830    .891
+            147           PC    .930    .948    .949    .948   1.000                                        
+            148           LS            87.7                                                                
+            149           UC     .19     .27                                                                
+                          *                                                                               
+1                                                       HEC-1 INPUT                                             PAGE  5
+
+           LINE           ID.......1.......2.......3.......4.......5.......6.......7.......8.......9......10
+
+ 
+            150           KK  SW00                                                                          
+            151           HC       2                                                                        
+                          *                                                                               
+            152           ZZ                                                                                
+1
+                 SCHEMATIC DIAGRAM OF STREAM NETWORK
+ INPUT
+  LINE      (V) ROUTING          (--->) DIVERSION OR PUMP FLOW
+
+   NO.      (.) CONNECTOR        (<---) RETURN OF DIVERTED OR PUMPED FLOW
+
+     7      MG24  
+                 V
+                 V
+    16      MG23R 
+                 .
+                 .
+    18           .      XMG23 
+                 .           .
+                 .           .
+    27      MG23  ............
+                 V
+                 V
+    29      MG18R 
+                 .
+                 .
+    31           .      XMG18 
+                 .           .
+                 .           .
+    40      MG18  ............
+                 .
+                 .
+    42           .      GSC04 
+                 .           V
+                 .           V
+    51           .      GSC00R
+                 .           .
+                 .           .
+    53           .           .      XGSC00
+                 .           .           .
+                 .           .           .
+    62           .      GSC00 ............
+                 .           .
+                 .           .
+    64           .           .      XMG17 
+                 .           .           .
+                 .           .           .
+    73      MG17  ........................
+                 V
+                 V
+    75      MG15R 
+                 .
+                 .
+    77           .      XMG15 
+                 .           .
+                 .           .
+    86      MG15  ............
+                 .
+                 .
+    88           .      SYC00 
+                 .           .
+                 .           .
+    97           .           .      XMG14 
+                 .           .           .
+                 .           .           .
+   106      MG14  ........................
+                 V
+                 V
+   108      MG13R 
+                 .
+                 .
+   110           .      XMG13 
+                 .           .
+                 .           .
+   119      MG13  ............
+                 .
+                 .
+   121           .      JJC10 
+                 .           .
+                 .           .
+   130           .           .      SW01  
+                 .           .           V
+                 .           .           V
+   139           .           .      SW00R 
+                 .           .           .
+                 .           .           .
+   141           .           .           .      XSW00 
+                 .           .           .           .
+                 .           .           .           .
+   150           .           .      SW00  ............
+
+ (***) RUNOFF ALSO COMPUTED AT THIS LOCATION
+1*****************************************                                                   ***************************************
+ *                                       *                                                   *                                     *
+ *   FLOOD HYDROGRAPH PACKAGE  (HEC-1)   *                                                   *    U.S. ARMY CORPS OF ENGINEERS     *
+ *               JUN   1998              *                                                   *    HYDROLOGIC ENGINEERING CENTER    *
+ *            VERSION 4.1                *                                                   *          609 SECOND STREET          *
+ *                                       *                                                   *       DAVIS, CALIFORNIA 95616       *
+ *  RUN DATE   26MAY22  TIME  19:56:06   *                                                   *           (916) 756-1104            *
+ *                                       *                                                   *                                     *
+ *****************************************                                                   ***************************************
+
+
+
+
+
+                            Project(Flood)                                                               
+
+    3 IO          OUTPUT CONTROL VARIABLES
+                        IPRNT           5  PRINT CONTROL
+                        IPLOT           1  PLOT CONTROL
+                        QSCAL          0.  HYDROGRAPH PLOT SCALE
+
+      IT          HYDROGRAPH TIME DATA
+                         NMIN          60  MINUTES IN COMPUTATION INTERVAL
+                        IDATE     11JUL 5  STARTING DATE
+                        ITIME        1800  STARTING TIME
+                           NQ         300  NUMBER OF HYDROGRAPH ORDINATES
+                       NDDATE     24JUL 5  ENDING DATE
+                       NDTIME        0500  ENDING TIME
+                       ICENT           19  CENTURY MARK
+
+                    COMPUTATION INTERVAL    1.00 HOURS
+                         TOTAL TIME BASE  299.00 HOURS
+
+           METRIC UNITS
+                DRAINAGE AREA         SQUARE KILOMETERS
+                PRECIPITATION DEPTH   MILLIMETERS
+                LENGTH, ELEVATION     METERS
+                FLOW                  CUBIC METERS PER SECOND
+                STORAGE VOLUME        CUBIC METERS
+                SURFACE AREA          SQUARE METERS
+                TEMPERATURE           DEGREES CELSIUS
+
+                  USER-DEFINED OUTPUT SPECIFICATIONS
+
+          TABLE 1
+      VS       STATION    SW00                                                                                            
+      VV VARIABLE CODE      2.11       .00       .00       .00       .00       .00       .00       .00       .00       .00
+ ***** WARNING *****  POSSIBLE INSTABILITIES IN THE MUSKINGUM ROUTING FOR REACH  MG18R .
+       ADJUST NSTPS AND/OR COMPUTATION INTERVAL TO MEET CRITERIA IN USER MANUAL). 
+ ***** WARNING *****  POSSIBLE INSTABILITIES IN THE MUSKINGUM ROUTING FOR REACH  MG13R .
+       ADJUST NSTPS AND/OR COMPUTATION INTERVAL TO MEET CRITERIA IN USER MANUAL). 
+ ***** WARNING *****  POSSIBLE INSTABILITIES IN THE MUSKINGUM ROUTING FOR REACH  SW00R .
+       ADJUST NSTPS AND/OR COMPUTATION INTERVAL TO MEET CRITERIA IN USER MANUAL). 
+1
+
+
+                                 RUNOFF SUMMARY, AVERAGE FLOW IN CUBIC METERS PER SECOND
+                                               AREA IN SQUARE KILOMETERS
+
+                                       PEAK   TIME OF     AVERAGE FLOW FOR MAXIMUM PERIOD      BASIN     MAXIMUM     TIME OF
+          OPERATION       STATION      FLOW     PEAK                                            AREA      STAGE     MAX STAGE
++                                                          6-HOUR     24-HOUR     72-HOUR
+
+          HYDROGRAPH AT
++                          MG24       532.17   17.00       485.16      226.61       76.11      79.90
+
+          ROUTED TO
++                          MG23R      530.63   18.00       482.40      226.55       76.11      79.90
+
+          HYDROGRAPH AT
++                          XMG23      203.46   17.00       183.67       83.86       28.03      27.50
+
+          2 COMBINED AT
++                          MG23       721.98   18.00       656.40      309.72      104.15     107.40
+
+          ROUTED TO
++                          MG18R      724.22   18.00       657.70      309.78      104.15     107.40
+
+          HYDROGRAPH AT
++                          XMG18      266.10   17.00       238.89      107.64       36.05      33.50
+
+          2 COMBINED AT
++                          MG18       978.80   18.00       886.68      416.97      140.20     140.90
+
+          HYDROGRAPH AT
++                          GSC04      459.97   18.00       414.43      192.51       64.82      68.60
+
+          ROUTED TO
++                          GSC00R     455.52   19.00       410.04      192.44       64.82      68.60
+
+          HYDROGRAPH AT
++                          XGSC00     530.71   18.00       482.75      235.21       79.88      77.10
+
+          2 COMBINED AT
++                          GSC00      978.75   19.00       888.93      427.50      144.70     145.70
+
+          HYDROGRAPH AT
++                          XMG17         .00     .00          .00         .00         .00        .10
+
+          3 COMBINED AT
++                          MG17      1956.88   18.00      1773.86      841.85      284.90     286.70
+
+          ROUTED TO
++                          MG15R     1870.12   19.00      1708.62      839.03      284.90     286.70
+
+          HYDROGRAPH AT
++                          XMG15      446.19   18.00       406.41      199.63       67.89      68.50
+
+          2 COMBINED AT
++                          MG15      2314.28   19.00      2111.04     1038.62      352.79     355.20
+
+          HYDROGRAPH AT
++                          SYC00      914.76   19.00       834.83      426.91      146.33     152.70
+
+          HYDROGRAPH AT
++                          XMG14         .00     .00          .00         .00         .00        .10
+
+          3 COMBINED AT
++                          MG14      3229.03   19.00      2945.88     1465.53      499.12     508.00
+
+          ROUTED TO
++                          MG13R     3200.72   20.00      2916.85     1465.41      499.12     508.00
+
+          HYDROGRAPH AT
++                          XMG13       92.62   17.00        83.05       36.71       12.27      13.90
+
+          2 COMBINED AT
++                          MG13      3258.47   19.00      2984.44     1500.95      511.39     521.90
+
+          HYDROGRAPH AT
++                          JJC10      238.30   17.00       214.71       95.58       32.01      31.70
+
+          HYDROGRAPH AT
++                          SW01       194.16   17.00       173.58       76.41       25.52      26.00
+
+          ROUTED TO
++                          SW00R      194.67   17.00       174.09       76.41       25.52      26.00
+
+          HYDROGRAPH AT
++                          XSW00       24.27   16.00        21.73        9.25        3.08       2.90
+
+          2 COMBINED AT
++                          SW00       218.40   17.00       195.23       85.64       28.60      28.90
+
+1TABLE 1    STATION      SW00  
+                           FLOW
+
+ PER  DAY MON  HRMN
+
+   1   11 JUL  1800         .00
+   2   11 JUL  1900         .00
+   3   11 JUL  2000         .00
+   4   11 JUL  2100         .19
+   5   11 JUL  2200        3.92
+   6   11 JUL  2300       11.57
+   7   12 JUL  0000       16.87
+   8   12 JUL  0100       18.36
+   9   12 JUL  0200       21.32
+  10   12 JUL  0300       29.93
+  11   12 JUL  0400       45.57
+  12   12 JUL  0500       69.77
+  13   12 JUL  0600      101.17
+  14   12 JUL  0700      135.76
+  15   12 JUL  0800      169.71
+  16   12 JUL  0900      197.55
+  17   12 JUL  1000      215.01
+  18   12 JUL  1100      218.40
+  19   12 JUL  1200      206.31
+  20   12 JUL  1300      179.38
+  21   12 JUL  1400      139.82
+  22   12 JUL  1500       93.57
+  23   12 JUL  1600       48.20
+  24   12 JUL  1700       17.40
+  25   12 JUL  1800       37.61
+  26   12 JUL  1900       54.26
+  27   12 JUL  2000       20.12
+  28   12 JUL  2100        4.20
+  29   12 JUL  2200        3.12
+  30   12 JUL  2300        -.05
+  31   13 JUL  0000         .55
+  32   13 JUL  0100        -.36
+  33   13 JUL  0200         .24
+  34   13 JUL  0300        -.16
+  35   13 JUL  0400         .10
+  36   13 JUL  0500        -.07
+  37   13 JUL  0600         .04
+  38   13 JUL  0700        -.03
+  39   13 JUL  0800         .02
+  40   13 JUL  0900        -.01
+  41   13 JUL  1000         .01
+  42   13 JUL  1100        -.01
+  43   13 JUL  1200         .00
+  44   13 JUL  1300         .00
+  45   13 JUL  1400         .00
+  46   13 JUL  1500         .00
+  47   13 JUL  1600         .00
+  48   13 JUL  1700         .00
+  49   13 JUL  1800         .00
+  50   13 JUL  1900         .00
+
+1TABLE 1    STATION      SW00  
+ (CONT.)                   FLOW
+
+ PER  DAY MON  HRMN
+
+  51   13 JUL  2000         .00
+  52   13 JUL  2100         .00
+  53   13 JUL  2200         .00
+  54   13 JUL  2300         .00
+  55   14 JUL  0000         .00
+  56   14 JUL  0100         .00
+  57   14 JUL  0200         .00
+  58   14 JUL  0300         .00
+  59   14 JUL  0400         .00
+  60   14 JUL  0500         .00
+  61   14 JUL  0600         .00
+  62   14 JUL  0700         .00
+  63   14 JUL  0800         .00
+  64   14 JUL  0900         .00
+  65   14 JUL  1000         .00
+  66   14 JUL  1100         .00
+  67   14 JUL  1200         .00
+  68   14 JUL  1300         .00
+  69   14 JUL  1400         .00
+  70   14 JUL  1500         .00
+  71   14 JUL  1600         .00
+  72   14 JUL  1700         .00
+  73   14 JUL  1800         .00
+  74   14 JUL  1900         .00
+  75   14 JUL  2000         .00
+  76   14 JUL  2100         .00
+  77   14 JUL  2200         .00
+  78   14 JUL  2300         .00
+  79   15 JUL  0000         .00
+  80   15 JUL  0100         .00
+  81   15 JUL  0200         .00
+  82   15 JUL  0300         .00
+  83   15 JUL  0400         .00
+  84   15 JUL  0500         .00
+  85   15 JUL  0600         .00
+  86   15 JUL  0700         .00
+  87   15 JUL  0800         .00
+  88   15 JUL  0900         .00
+  89   15 JUL  1000         .00
+  90   15 JUL  1100         .00
+  91   15 JUL  1200         .00
+  92   15 JUL  1300         .00
+  93   15 JUL  1400         .00
+  94   15 JUL  1500         .00
+  95   15 JUL  1600         .00
+  96   15 JUL  1700         .00
+  97   15 JUL  1800         .00
+  98   15 JUL  1900         .00
+  99   15 JUL  2000         .00
+ 100   15 JUL  2100         .00
+
+1TABLE 1    STATION      SW00  
+ (CONT.)                   FLOW
+
+ PER  DAY MON  HRMN
+
+ 101   15 JUL  2200         .00
+ 102   15 JUL  2300         .00
+ 103   16 JUL  0000         .00
+ 104   16 JUL  0100         .00
+ 105   16 JUL  0200         .00
+ 106   16 JUL  0300         .00
+ 107   16 JUL  0400         .00
+ 108   16 JUL  0500         .00
+ 109   16 JUL  0600         .00
+ 110   16 JUL  0700         .00
+ 111   16 JUL  0800         .00
+ 112   16 JUL  0900         .00
+ 113   16 JUL  1000         .00
+ 114   16 JUL  1100         .00
+ 115   16 JUL  1200         .00
+ 116   16 JUL  1300         .00
+ 117   16 JUL  1400         .00
+ 118   16 JUL  1500         .00
+ 119   16 JUL  1600         .00
+ 120   16 JUL  1700         .00
+ 121   16 JUL  1800         .00
+ 122   16 JUL  1900         .00
+ 123   16 JUL  2000         .00
+ 124   16 JUL  2100         .00
+ 125   16 JUL  2200         .00
+ 126   16 JUL  2300         .00
+ 127   17 JUL  0000         .00
+ 128   17 JUL  0100         .00
+ 129   17 JUL  0200         .00
+ 130   17 JUL  0300         .00
+ 131   17 JUL  0400         .00
+ 132   17 JUL  0500         .00
+ 133   17 JUL  0600         .00
+ 134   17 JUL  0700         .00
+ 135   17 JUL  0800         .00
+ 136   17 JUL  0900         .00
+ 137   17 JUL  1000         .00
+ 138   17 JUL  1100         .00
+ 139   17 JUL  1200         .00
+ 140   17 JUL  1300         .00
+ 141   17 JUL  1400         .00
+ 142   17 JUL  1500         .00
+ 143   17 JUL  1600         .00
+ 144   17 JUL  1700         .00
+ 145   17 JUL  1800         .00
+ 146   17 JUL  1900         .00
+ 147   17 JUL  2000         .00
+ 148   17 JUL  2100         .00
+ 149   17 JUL  2200         .00
+ 150   17 JUL  2300         .00
+
+1TABLE 1    STATION      SW00  
+ (CONT.)                   FLOW
+
+ PER  DAY MON  HRMN
+
+ 151   18 JUL  0000         .00
+ 152   18 JUL  0100         .00
+ 153   18 JUL  0200         .00
+ 154   18 JUL  0300         .00
+ 155   18 JUL  0400         .00
+ 156   18 JUL  0500         .00
+ 157   18 JUL  0600         .00
+ 158   18 JUL  0700         .00
+ 159   18 JUL  0800         .00
+ 160   18 JUL  0900         .00
+ 161   18 JUL  1000         .00
+ 162   18 JUL  1100         .00
+ 163   18 JUL  1200         .00
+ 164   18 JUL  1300         .00
+ 165   18 JUL  1400         .00
+ 166   18 JUL  1500         .00
+ 167   18 JUL  1600         .00
+ 168   18 JUL  1700         .00
+ 169   18 JUL  1800         .00
+ 170   18 JUL  1900         .00
+ 171   18 JUL  2000         .00
+ 172   18 JUL  2100         .00
+ 173   18 JUL  2200         .00
+ 174   18 JUL  2300         .00
+ 175   19 JUL  0000         .00
+ 176   19 JUL  0100         .00
+ 177   19 JUL  0200         .00
+ 178   19 JUL  0300         .00
+ 179   19 JUL  0400         .00
+ 180   19 JUL  0500         .00
+ 181   19 JUL  0600         .00
+ 182   19 JUL  0700         .00
+ 183   19 JUL  0800         .00
+ 184   19 JUL  0900         .00
+ 185   19 JUL  1000         .00
+ 186   19 JUL  1100         .00
+ 187   19 JUL  1200         .00
+ 188   19 JUL  1300         .00
+ 189   19 JUL  1400         .00
+ 190   19 JUL  1500         .00
+ 191   19 JUL  1600         .00
+ 192   19 JUL  1700         .00
+ 193   19 JUL  1800         .00
+ 194   19 JUL  1900         .00
+ 195   19 JUL  2000         .00
+ 196   19 JUL  2100         .00
+ 197   19 JUL  2200         .00
+ 198   19 JUL  2300         .00
+ 199   20 JUL  0000         .00
+ 200   20 JUL  0100         .00
+
+1TABLE 1    STATION      SW00  
+ (CONT.)                   FLOW
+
+ PER  DAY MON  HRMN
+
+ 201   20 JUL  0200         .00
+ 202   20 JUL  0300         .00
+ 203   20 JUL  0400         .00
+ 204   20 JUL  0500         .00
+ 205   20 JUL  0600         .00
+ 206   20 JUL  0700         .00
+ 207   20 JUL  0800         .00
+ 208   20 JUL  0900         .00
+ 209   20 JUL  1000         .00
+ 210   20 JUL  1100         .00
+ 211   20 JUL  1200         .00
+ 212   20 JUL  1300         .00
+ 213   20 JUL  1400         .00
+ 214   20 JUL  1500         .00
+ 215   20 JUL  1600         .00
+ 216   20 JUL  1700         .00
+ 217   20 JUL  1800         .00
+ 218   20 JUL  1900         .00
+ 219   20 JUL  2000         .00
+ 220   20 JUL  2100         .00
+ 221   20 JUL  2200         .00
+ 222   20 JUL  2300         .00
+ 223   21 JUL  0000         .00
+ 224   21 JUL  0100         .00
+ 225   21 JUL  0200         .00
+ 226   21 JUL  0300         .00
+ 227   21 JUL  0400         .00
+ 228   21 JUL  0500         .00
+ 229   21 JUL  0600         .00
+ 230   21 JUL  0700         .00
+ 231   21 JUL  0800         .00
+ 232   21 JUL  0900         .00
+ 233   21 JUL  1000         .00
+ 234   21 JUL  1100         .00
+ 235   21 JUL  1200         .00
+ 236   21 JUL  1300         .00
+ 237   21 JUL  1400         .00
+ 238   21 JUL  1500         .00
+ 239   21 JUL  1600         .00
+ 240   21 JUL  1700         .00
+ 241   21 JUL  1800         .00
+ 242   21 JUL  1900         .00
+ 243   21 JUL  2000         .00
+ 244   21 JUL  2100         .00
+ 245   21 JUL  2200         .00
+ 246   21 JUL  2300         .00
+ 247   22 JUL  0000         .00
+ 248   22 JUL  0100         .00
+ 249   22 JUL  0200         .00
+ 250   22 JUL  0300         .00
+
+1TABLE 1    STATION      SW00  
+ (CONT.)                   FLOW
+
+ PER  DAY MON  HRMN
+
+ 251   22 JUL  0400         .00
+ 252   22 JUL  0500         .00
+ 253   22 JUL  0600         .00
+ 254   22 JUL  0700         .00
+ 255   22 JUL  0800         .00
+ 256   22 JUL  0900         .00
+ 257   22 JUL  1000         .00
+ 258   22 JUL  1100         .00
+ 259   22 JUL  1200         .00
+ 260   22 JUL  1300         .00
+ 261   22 JUL  1400         .00
+ 262   22 JUL  1500         .00
+ 263   22 JUL  1600         .00
+ 264   22 JUL  1700         .00
+ 265   22 JUL  1800         .00
+ 266   22 JUL  1900         .00
+ 267   22 JUL  2000         .00
+ 268   22 JUL  2100         .00
+ 269   22 JUL  2200         .00
+ 270   22 JUL  2300         .00
+ 271   23 JUL  0000         .00
+ 272   23 JUL  0100         .00
+ 273   23 JUL  0200         .00
+ 274   23 JUL  0300         .00
+ 275   23 JUL  0400         .00
+ 276   23 JUL  0500         .00
+ 277   23 JUL  0600         .00
+ 278   23 JUL  0700         .00
+ 279   23 JUL  0800         .00
+ 280   23 JUL  0900         .00
+ 281   23 JUL  1000         .00
+ 282   23 JUL  1100         .00
+ 283   23 JUL  1200         .00
+ 284   23 JUL  1300         .00
+ 285   23 JUL  1400         .00
+ 286   23 JUL  1500         .00
+ 287   23 JUL  1600         .00
+ 288   23 JUL  1700         .00
+ 289   23 JUL  1800         .00
+ 290   23 JUL  1900         .00
+ 291   23 JUL  2000         .00
+ 292   23 JUL  2100         .00
+ 293   23 JUL  2200         .00
+ 294   23 JUL  2300         .00
+ 295   24 JUL  0000         .00
+ 296   24 JUL  0100         .00
+ 297   24 JUL  0200         .00
+ 298   24 JUL  0300         .00
+ 299   24 JUL  0400         .00
+ 300   24 JUL  0500         .00
+ 
+              MAX        218.40
+              MIN          -.36
+              AVE          6.86
+
+
+
+ *** NORMAL END OF HEC-1 ***
+
+
+

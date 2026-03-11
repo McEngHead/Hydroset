@@ -1,0 +1,60 @@
+[최상류]
+  MG24 (소유역)
+    │
+    ▼ (Muskingum Routing: MG23R) [cite: 54, 211]
+    │
+    ├─────── XMG23 (지류 유입) [cite: 57, 213]
+    │
+  MG23 (합류점: MG24 + XMG23) [cite: 66, 214]
+    │
+    ▼ (Muskingum Routing: MG18R) [cite: 69, 214]
+    │
+    ├─────── XMG18 (지류 유입) [cite: 72, 216]
+    │
+  MG18 (합류점: MG23 + XMG18) [cite: 82, 217]
+    │
+    ├─────── GSC04 (지류 유입) [cite: 85, 219]
+    │           │
+    │           ▼ (Muskingum Routing: GSC00R) [cite: 94, 222]
+    │           │
+    │           ├─────── XGSC00 (지류 유입) [cite: 97, 224]
+    │           │
+    │         GSC00 (합류점: GSC04 + XGSC00) [cite: 106, 226]
+    │           │
+    ├───────────┤
+    │           │
+    │        XMG17 (미소 유역) [cite: 109, 228]
+    │           │
+  MG17 (합류점: MG18 + GSC00 + XMG17) [cite: 119, 229]
+    │
+    ▼ (Muskingum Routing: MG15R) [cite: 123, 229]
+    │
+    ├─────── XMG15 (지류 유입) [cite: 126, 231]
+    │
+  MG15 (합류점: MG17 + XMG15) [cite: 135, 232]
+    │
+    ├─────── SYC00 (지류 유입) [cite: 138, 234]
+    │
+    ├─────── XMG14 (미소 유역) [cite: 147, 236]
+    │
+  MG14 (합류점: MG15 + SYC00 + XMG14) [cite: 157, 237]
+    │
+    ▼ (Muskingum Routing: MG13R) [cite: 159, 237]
+    │
+    ├─────── XMG13 (지류 유입) [cite: 163, 239]
+    │
+  MG13 (합류점: MG14 + XMG13) [cite: 172, 240]
+    │
+    ├─────── JJC10 (지류 유입) [cite: 175, 242]
+    │
+    ├─────── SW01 (지류 유입) [cite: 184, 244]
+    │           │
+    │           ▼ (Muskingum Routing: SW00R) [cite: 193, 247]
+    │           │
+    │           ├─────── XSW00 (지류 유입) [cite: 196, 249]
+    │           │
+    │         SW00 (합류점: SW01 + XSW00) [cite: 206, 251]
+    │           │
+    └───────────┘
+                │
+              [최종 유출점: SW00] [cite: 251]
