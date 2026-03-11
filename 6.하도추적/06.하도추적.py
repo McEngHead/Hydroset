@@ -52,7 +52,7 @@ HUFF_PRESETS = {
 # 노드 타입별 스타일
 NODE_STYLES = {
     'SUBBASIN': {'label': '소유역',   'fill': '#1d5c33', 'outline': '#27ae60', 'shape': 'round_rect'},
-    'REACH':    {'label': '하도구간', 'fill': '#1a2d4a', 'outline': '#2980b9', 'shape': 'parallelogram'},
+    'REACH':    {'label': '하도추적', 'fill': '#1a2d4a', 'outline': '#2980b9', 'shape': 'parallelogram'},
     'JUNCTION': {'label': '합류점',   'fill': '#1c3d5a', 'outline': '#5dade2', 'shape': 'circle'},
     'OUTLET':   {'label': '출구',     'fill': '#4a1c6e', 'outline': '#8e44ad', 'shape': 'rect'},
 }
@@ -510,10 +510,11 @@ class NetworkCanvas(tk.Canvas):
 
     # ── orthogonal edge routing ───────────────────────────────────────────────
     _ARC_P = {                              # corner arc (start_angle, extent)
-        ('E','S'):(180, 90), ('E','N'):(180,-90),
-        ('W','S'):(0,  -90), ('W','N'):(0,   90),
-        ('S','E'):(90, -90), ('S','W'):(90,  90),
-        ('N','E'):(270, 90), ('N','W'):(270,-90),
+        # tkinter: positive extent = CW on screen (0=E, 90=S, 180=W, 270=N)
+        ('E','S'):(180,-90), ('E','N'):(180, 90),
+        ('W','S'):(0,   90), ('W','N'):(0,  -90),
+        ('S','E'):(270, 90), ('S','W'):(270,-90),
+        ('N','E'):(90, -90), ('N','W'):(90,  90),
     }
 
     @staticmethod
@@ -1366,7 +1367,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._canvas.set_mode(f'place:{ntype}')
         label_map = {
             'SUBBASIN': '소유역 배치 중 (캔버스 클릭)',
-            'REACH':    '하도구간 배치 중 (캔버스 클릭)',
+            'REACH':    '하도추적 배치 중 (캔버스 클릭)',
             'JUNCTION': '합류점 배치 중 (캔버스 클릭)',
             'OUTLET':   '출구 배치 중 (캔버스 클릭)',
         }

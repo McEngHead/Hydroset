@@ -108,8 +108,50 @@ NetworkEditorWindow (CTkToplevel)
 
 ---
 
+### Step 6 — 예정 기능 확장 (2026-03-12 설계)
+
+#### [EXT-1] 저수지추적 (RESERVOIR 노드)
+**방법:** HEC-1 Modified Puls (Storage Indication Method)
+```
+(I₁ + I₂)/2 + (2S₁/Δt - O₁)/2 = (2S₂/Δt + O₂)/2
+→ I₁ + I₂ + (2S₁/Δt - O₁) = (2S₂/Δt + O₂)
+```
+- 입력: E-S-Q 테이블 (수위-저류량-방류량) or 여수로 매개변수
+- 여수로: Q = Cd × L × (H - Hc)^1.5 (광정 위어)
+- 초기 조건: 초기 저류량 S₀ (m³) 또는 초기 수위
+- 스택 조작: BASIN과 동일 (독립 유입 → push), 또는 ROUTE 앞에 위치
+- 노드 모양: 육각형 (파란색 계열)
+- 파라미터: `S_Q_TABLE` (리스트), `Cd`, `L`, `Hc`, `S0`
+
+#### [EXT-2] 스냅 to Grid
+- `_place_node`: `x = round(x / GRID) * GRID`
+- `_drag` 종료 시: snap 적용
+- 툴바에 "스냅 ON/OFF" 토글 버튼 추가 (`_snap_on = True`)
+- snap 적용 함수: `_snap(v) = round(v / GRID) * GRID`
+
+#### [EXT-3] 직선+아크 엣지 (스냅 전제)
+스냅 적용 시 노드가 격자 정렬 → 직교(Manhattan) 라우팅 자연스럽게 적용
+```
+포트 → 수평/수직 선분 조합 → 포트
+꺾임 지점: 작은 호(arc) 또는 45° 모따기
+```
+- `_draw_edges` 내 `_bezier_cps` 대체 → `_ortho_path(x1,y1,d1,x2,y2,d2)` 구현
+- 반환: [(x,y), ...] 좌표 목록 → `create_line(*pts)`
+
+#### [EXT-4] 하도추적 요소 → 엣지화 (명칭: 하도구간 → 하도추적)
+- REACH 노드 폐지 → `NetworkEdge`에 선택적 `reach_params: dict | None` 추가
+- `reach_params = {'K': float, 'X': float, 'NSTPS': int}` → 하도추적 엣지
+- 엣지가 reach_params를 가지면 평행사변형 라벨을 엣지 중간에 렌더링
+- `build_operations`: 엣지 순회 시 reach_params 있으면 ROUTE op 자동 삽입
+- 엣지 클릭 → PropertiesPanel에 reach_params 편집 폼 표시
+- 팔레트 "하도추적" 버튼: 클릭 후 두 노드를 순서대로 클릭하면 reach 엣지 연결
+- 명칭: `NODE_STYLES['REACH']['label']` = `'하도추적'` (기존 하도구간 → 변경)
+
+---
+
 ## 코드 관례
 
+- **REACH 노드 명칭:** `'하도추적'` — "하도구간"은 폐기된 구명칭. `NODE_STYLES['REACH']['label']`은 반드시 `'하도추적'`으로 유지.
 - **UI 텍스트:** 한국어 전용, 폰트 `맑은 고딕`
 - **다크 타이틀바:** `DwmSetWindowAttribute(hwnd, 35/20, 1)` — 모든 창에 적용
 - **진입점:** `sys.argv[1]` = project_path, `sys.argv[2]` = input_file
