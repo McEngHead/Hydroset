@@ -290,35 +290,35 @@ class NetworkNode:
             return (px - self.x)**2 + (py - self.y)**2 <= hw**2
         return abs(px - self.x) <= hw and abs(py - self.y) <= hh
 
-    def port_out(self):
-        if self.type == 'SUBBASIN': return (self.x + 58, self.y)
-        if self.type == 'REACH':    return (self.x + 62, self.y)
-        if self.type == 'JUNCTION': return (self.x, self.y + 28)
-        return None  # OUTLET has no output
-
-    def port_in(self):
-        if self.type == 'SUBBASIN': return None  # no input
-        if self.type == 'REACH':    return (self.x - 62, self.y)
-        if self.type == 'JUNCTION': return (self.x, self.y - 28)
-        if self.type == 'OUTLET':   return (self.x - 30, self.y)
-        return None
+    def port(self, direction):
+        """Returns port position for direction 'E','W','N','S'."""
+        hw = self._HW.get(self.type, 40)
+        hh = self._HH.get(self.type, 20)
+        return {
+            'E': (self.x + hw, self.y),
+            'W': (self.x - hw, self.y),
+            'S': (self.x, self.y + hh),
+            'N': (self.x, self.y - hh),
+        }[direction]
 
 
 class NetworkEdge:
     _counter = 0
 
-    def __init__(self, src_id, dst_id):
+    def __init__(self, src_id, dst_id, src_dir=None, dst_dir=None):
         NetworkEdge._counter += 1
-        self.id  = NetworkEdge._counter
-        self.src = src_id
-        self.dst = dst_id
+        self.id      = NetworkEdge._counter
+        self.src     = src_id
+        self.dst     = dst_id
+        self.src_dir = src_dir  # 'E','W','N','S' or None=auto
+        self.dst_dir = dst_dir
 
 
 # =============================================================================
 # 네트워크 캔버스
 # =============================================================================
 
-PORT_R = 6  # port circle radius
+PORT_R = 4  # port circle radius
 HIT_R  = 12 # port hit radius
 
 
@@ -334,9 +334,13 @@ class NetworkCanvas(tk.Canvas):
         self._sel_edge = None
         self._mode     = 'select'
         self._drag_start = None       # (ex, ey, nx, ny)
-        self._conn_src   = None       # node id being connected from
+        self._conn_src     = None       # node id being connected from
+        self._conn_src_dir = None       # direction of connection start
         self._mouse_xy   = (0, 0)
         self._on_select  = on_select  # callback(node or None)
+        self._zoom       = 1.0
+        self._world_bbox = (0, 0, 3000, 1200)
+        self._pan_last   = None
 
         self.bind('<Button-1>',        self._click)
         self.bind('<B1-Motion>',       self._drag)
@@ -347,6 +351,14 @@ class NetworkCanvas(tk.Canvas):
         self.bind('<Escape>',          self._escape)
         self.bind('<Double-Button-1>', self._dbl_click)
         self.bind('<Configure>',       lambda e: self.redraw())
+        self.bind('<MouseWheel>',      self._on_zoom)
+        self.bind('<Button-2>',        self._on_pan_press)
+        self.bind('<B2-Motion>',       self._on_pan_drag)
+        self.bind('<ButtonRelease-2>', self._on_pan_release)
+        self.bind('<Left>',            self._on_arrow)
+        self.bind('<Right>',           self._on_arrow)
+        self.bind('<Up>',              self._on_arrow)
+        self.bind('<Down>',            self._on_arrow)
 
     # ── coordinate helpers ───────────────────────────────────────────────────
 
@@ -377,28 +389,30 @@ class NetworkCanvas(tk.Canvas):
             y0 = int(self.canvasy(0)); y1 = int(self.canvasy(h))
         except Exception:
             x0, x1, y0, y1 = 0, w, 0, h
-        g = self.GRID
+        g = max(10, int(self.GRID * self._zoom))
         for x in range((x0 // g) * g, x1 + g, g):
             self.create_line(x, y0, x, y1, fill='#1e1e30', width=1)
         for y in range((y0 // g) * g, y1 + g, g):
             self.create_line(x0, y, x1, y, fill='#1e1e30', width=1)
 
     def _draw_edges(self):
+        z = self._zoom
         for edge in self.edges.values():
             src = self.nodes.get(edge.src)
             dst = self.nodes.get(edge.dst)
             if not src or not dst: continue
-            p1 = src.port_out()
-            p2 = dst.port_in()
-            if not p1 or not p2: continue
-            x1, y1 = p1; x2, y2 = p2
+            sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
+            wx1, wy1 = src.port(sd)
+            wx2, wy2 = dst.port(dd)
+            x1, y1 = wx1*z, wy1*z
+            x2, y2 = wx2*z, wy2*z
             sel = self._sel_edge and self._sel_edge.id == edge.id
             col = '#f39c12' if sel else '#3498db'
-            lw  = 3 if sel else 2
-            dx  = max(abs(x2 - x1) * 0.45, 40)
-            self.create_line(x1, y1, x1+dx, y1, x2-dx, y2, x2, y2,
+            lw  = 2 if sel else 1
+            cp1, cp2 = self._bezier_cps(x1, y1, sd, x2, y2, dd)
+            self.create_line(x1, y1, cp1[0], cp1[1], cp2[0], cp2[1], x2, y2,
                              smooth=True, fill=col, width=lw,
-                             arrow=tk.LAST, arrowshape=(10, 12, 4),
+                             arrow=tk.LAST, arrowshape=(7, 9, 3),
                              tags=f'edge_{edge.id}')
 
     def _draw_nodes(self):
@@ -412,50 +426,47 @@ class NetworkCanvas(tk.Canvas):
         sel = self._sel_node and self._sel_node.id == node.id
         if sel:
             outline = '#f39c12'
-            lw = 3
-        else:
-            lw = 2
+        lw = max(1, int((3 if sel else 2) * self._zoom))
 
-        x, y = node.x, node.y
+        z  = self._zoom
+        x, y = node.x * z, node.y * z
+        hw = node._HW.get(node.type, 40) * z
+        hh = node._HH.get(node.type, 20) * z
         tag = f'node_{node.id}'
 
         if node.type == 'SUBBASIN':
-            self._round_rect(x-58, y-26, x+58, y+26, 10,
+            self._round_rect(x-hw, y-hh, x+hw, y+hh, 10*z,
                              fill=fill, outline=outline, width=lw, tags=tag)
         elif node.type == 'REACH':
-            off = 10
-            pts = [x-62+off, y-20, x+62+off, y-20, x+62-off, y+20, x-62-off, y+20]
+            off = 10 * z
+            pts = [x-hw+off, y-hh, x+hw+off, y-hh, x+hw-off, y+hh, x-hw-off, y+hh]
             self.create_polygon(*pts, fill=fill, outline=outline, width=lw, tags=tag)
         elif node.type == 'JUNCTION':
-            self.create_oval(x-28, y-28, x+28, y+28,
+            self.create_oval(x-hw, y-hh, x+hw, y+hh,
                              fill=fill, outline=outline, width=lw, tags=tag)
         elif node.type == 'OUTLET':
-            self.create_rectangle(x-30, y-26, x+30, y+26,
+            self.create_rectangle(x-hw, y-hh, x+hw, y+hh,
                                   fill=fill, outline=outline, width=lw, tags=tag)
 
         lbl = style.get('label', node.type)
-        self.create_text(x, y-7, text=node.name, fill='white',
-                         font=('맑은 고딕', 9, 'bold'), tags=tag)
-        self.create_text(x, y+8, text=f'[{lbl}]', fill='#888888',
-                         font=('맑은 고딕', 8), tags=tag)
+        fs_name = min(max(6, int(9*z)), 18)
+        fs_type = min(max(5, int(8*z)), 16)
+        self.create_text(x, y - 7*z, text=node.name, fill='white',
+                         font=('맑은 고딕', fs_name, 'bold'), tags=tag)
+        self.create_text(x, y + 8*z, text=f'[{lbl}]', fill='#888888',
+                         font=('맑은 고딕', fs_type), tags=tag)
 
-        # Output port (orange)
-        po = node.port_out()
-        if po:
-            px, py = po
-            self.create_oval(px-PORT_R, py-PORT_R, px+PORT_R, py+PORT_R,
-                             fill='#e67e22', outline='#f39c12', width=1,
-                             tags=f'portout_{node.id}')
-
-        # Input port (green)
-        pi = node.port_in()
-        if pi:
-            px, py = pi
-            n_in = sum(1 for e in self.edges.values() if e.dst == node.id)
-            col_in = '#2ecc71' if n_in > 0 else '#27ae60'
-            self.create_oval(px-PORT_R, py-PORT_R, px+PORT_R, py+PORT_R,
-                             fill=col_in, outline='#2ecc71', width=1,
-                             tags=f'portin_{node.id}')
+        # Four-direction port circles
+        has_out      = node.type != 'OUTLET'
+        port_fill    = '#e67e22' if has_out else '#27ae60'
+        port_outline = '#f39c12' if has_out else '#2ecc71'
+        pr = max(2, int(PORT_R * z))
+        for d in ('E', 'W', 'N', 'S'):
+            wx, wy = node.port(d)
+            px, py = wx*z, wy*z
+            self.create_oval(px-pr, py-pr, px+pr, py+pr,
+                             fill=port_fill, outline=port_outline, width=1,
+                             tags=f'port_{d}_{node.id}')
 
     def _round_rect(self, x1, y1, x2, y2, r, **kw):
         pts = [x1+r,y1, x2-r,y1, x2,y1, x2,y1+r,
@@ -466,23 +477,51 @@ class NetworkCanvas(tk.Canvas):
     def _draw_rubber_band(self):
         src = self.nodes.get(self._conn_src)
         if not src: return
-        po = src.port_out()
-        if not po: return
-        x1, y1 = po
-        x2, y2 = self._mouse_xy
-        dx = max(abs(x2-x1)*0.4, 30)
-        self.create_line(x1, y1, x1+dx, y1, x2-dx, y2, x2, y2,
-                         smooth=True, fill='#5dade2', width=2, dash=(6,3))
+        d = self._conn_src_dir or 'E'
+        z = self._zoom
+        wx1, wy1 = src.port(d)
+        x1, y1 = wx1*z, wy1*z
+        wx2, wy2 = self._mouse_xy   # world coords
+        x2, y2 = wx2*z, wy2*z
+        DX = {'E': 1, 'W': -1, 'N': 0, 'S': 0}
+        DY = {'E': 0, 'W':  0, 'N':-1, 'S': 1}
+        off = max(abs(x2-x1)*0.4, abs(y2-y1)*0.4, 30)
+        self.create_line(x1, y1, x1+DX[d]*off, y1+DY[d]*off, x2, y2,
+                         smooth=True, fill='#5dade2', width=1, dash=(6,3))
+
+    @staticmethod
+    def _port_dirs(src, dst, src_hint=None, dst_hint=None):
+        """Auto-select best port directions based on relative node positions."""
+        dx = dst.x - src.x
+        dy = dst.y - src.y
+        if abs(dx) >= abs(dy):
+            auto_s, auto_d = ('E', 'W') if dx >= 0 else ('W', 'E')
+        else:
+            auto_s, auto_d = ('S', 'N') if dy >= 0 else ('N', 'S')
+        return (src_hint or auto_s, dst_hint or auto_d)
+
+    @staticmethod
+    def _bezier_cps(x1, y1, d1, x2, y2, d2):
+        """Compute bezier control points based on port exit/entry directions."""
+        dist = max(abs(x2-x1), abs(y2-y1), 1)
+        off  = max(dist * 0.45, 40)
+        DX = {'E': 1, 'W': -1, 'N': 0, 'S': 0}
+        DY = {'E': 0, 'W':  0, 'N':-1, 'S': 1}
+        return ((x1 + DX[d1]*off, y1 + DY[d1]*off),
+                (x2 + DX[d2]*off, y2 + DY[d2]*off))
 
     # ── events ───────────────────────────────────────────────────────────────
 
     def _motion(self, event):
-        self._mouse_xy = (self._cx(event.x), self._cy(event.y))
+        z = self._zoom
+        self._mouse_xy = (self._cx(event.x) / z, self._cy(event.y) / z)
         if self._mode == 'connect':
             self.redraw()
 
     def _click(self, event):
-        x, y = self._cx(event.x), self._cy(event.y)
+        self.focus_set()
+        z = self._zoom
+        x, y = self._cx(event.x) / z, self._cy(event.y) / z
 
         # --- PLACE MODE ---
         if self._mode.startswith('place:'):
@@ -494,37 +533,40 @@ class NetworkCanvas(tk.Canvas):
 
         # --- CONNECT MODE ---
         if self._mode == 'connect':
-            # Check if clicked near an input port
+            src_node = self.nodes.get(self._conn_src)
             for node in reversed(list(self.nodes.values())):
-                pi = node.port_in()
-                if pi and abs(x-pi[0]) <= HIT_R and abs(y-pi[1]) <= HIT_R:
-                    if node.id != self._conn_src:
-                        self._create_edge(self._conn_src, node.id)
-                    self._conn_src = None
-                    self.set_mode('select')
-                    self.redraw()
-                    return
-                if node.hit_test(x, y) and node.id != self._conn_src:
-                    # Clicked body of destination node
-                    self._create_edge(self._conn_src, node.id)
-                    self._conn_src = None
-                    self.set_mode('select')
-                    self.redraw()
-                    return
-            self._conn_src = None
-            self.set_mode('select')
-            self.redraw()
-            return
+                if node.id == self._conn_src: continue
+                if node.type == 'SUBBASIN': continue  # no inputs
+                # Check 4 port circles
+                for d in ('E', 'W', 'N', 'S'):
+                    px, py = node.port(d)
+                    if abs(x-px) <= HIT_R and abs(y-py) <= HIT_R:
+                        sd, dd = self._port_dirs(src_node, node, self._conn_src_dir, d)
+                        self._create_edge(self._conn_src, node.id, sd, d)
+                        self._conn_src = None; self._conn_src_dir = None
+                        self.set_mode('select'); self.redraw(); return
+                # Or click node body
+                if node.hit_test(x, y):
+                    sd, dd = self._port_dirs(src_node, node, self._conn_src_dir, None) \
+                             if src_node else ('E', 'W')
+                    self._create_edge(self._conn_src, node.id, sd, dd)
+                    self._conn_src = None; self._conn_src_dir = None
+                    self.set_mode('select'); self.redraw(); return
+            self._conn_src = None; self._conn_src_dir = None
+            self.set_mode('select'); self.redraw(); return
 
         # --- SELECT MODE ---
         # 1. Check output ports first (start connection)
         for node in reversed(list(self.nodes.values())):
-            po = node.port_out()
-            if po and abs(x-po[0]) <= HIT_R and abs(y-po[1]) <= HIT_R:
-                self._conn_src = node.id
-                self.set_mode('connect')
-                self.redraw()
-                return
+            if node.type == 'OUTLET': continue  # no outputs
+            for d in ('E', 'W', 'N', 'S'):
+                px, py = node.port(d)
+                if abs(x-px) <= HIT_R and abs(y-py) <= HIT_R:
+                    self._conn_src = node.id
+                    self._conn_src_dir = d
+                    self.set_mode('connect')
+                    self.redraw()
+                    return
 
         # 2. Check node bodies
         for node in reversed(list(self.nodes.values())):
@@ -541,15 +583,15 @@ class NetworkCanvas(tk.Canvas):
             src = self.nodes.get(edge.src)
             dst = self.nodes.get(edge.dst)
             if src and dst:
-                p1 = src.port_out(); p2 = dst.port_in()
-                if p1 and p2:
-                    mx = (p1[0]+p2[0])/2; my = (p1[1]+p2[1])/2
-                    if abs(x-mx) <= 15 and abs(y-my) <= 15:
-                        self._sel_edge = edge
-                        self._sel_node = None
-                        if self._on_select: self._on_select(None)
-                        self.redraw()
-                        return
+                sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
+                p1 = src.port(sd); p2 = dst.port(dd)
+                mx = (p1[0]+p2[0])/2; my = (p1[1]+p2[1])/2
+                if abs(x-mx) <= 15 and abs(y-my) <= 15:
+                    self._sel_edge = edge
+                    self._sel_node = None
+                    if self._on_select: self._on_select(None)
+                    self.redraw()
+                    return
 
         # 4. Nothing hit — deselect
         self._sel_node = None
@@ -559,7 +601,8 @@ class NetworkCanvas(tk.Canvas):
 
     def _drag(self, event):
         if self._drag_start and self._sel_node:
-            x, y = self._cx(event.x), self._cy(event.y)
+            z = self._zoom
+            x, y = self._cx(event.x) / z, self._cy(event.y) / z
             self._sel_node.x = self._drag_start[2] + (x - self._drag_start[0])
             self._sel_node.y = self._drag_start[3] + (y - self._drag_start[1])
             self.redraw()
@@ -584,11 +627,59 @@ class NetworkCanvas(tk.Canvas):
 
     def _escape(self, event):
         self._conn_src = None
+        self._conn_src_dir = None
         self.set_mode('select')
         self.redraw()
 
+    # ── zoom / pan ───────────────────────────────────────────────────────────
+
+    def _on_zoom(self, event):
+        factor   = 1.1 if event.delta > 0 else 1/1.1
+        new_zoom = max(0.15, min(4.0, self._zoom * factor))
+        if abs(new_zoom - self._zoom) < 1e-9: return
+        cx_m = self.canvasx(event.x)
+        cy_m = self.canvasy(event.y)
+        wx_m = cx_m / self._zoom
+        wy_m = cy_m / self._zoom
+        self._zoom = new_zoom
+        W = self._world_bbox[2] * self._zoom
+        H = self._world_bbox[3] * self._zoom
+        self.configure(scrollregion=(0, 0, int(W)+1, int(H)+1))
+        new_cx = wx_m * self._zoom
+        new_cy = wy_m * self._zoom
+        if W > 0: self.xview_moveto(max(0.0, (new_cx - event.x) / W))
+        if H > 0: self.yview_moveto(max(0.0, (new_cy - event.y) / H))
+        self.redraw()
+
+    def _on_pan_press(self, event):
+        self.configure(cursor='fleur')
+        self._pan_last = (event.x, event.y)
+
+    def _on_pan_drag(self, event):
+        if self._pan_last is None: return
+        dx = event.x - self._pan_last[0]
+        dy = event.y - self._pan_last[1]
+        self._pan_last = (event.x, event.y)
+        W = self._world_bbox[2] * self._zoom
+        H = self._world_bbox[3] * self._zoom
+        if W > 0: self.xview_moveto(max(0.0, self.xview()[0] - dx / W))
+        if H > 0: self.yview_moveto(max(0.0, self.yview()[0] - dy / H))
+
+    def _on_pan_release(self, event):
+        self.configure(cursor='crosshair' if self._mode != 'select' else 'arrow')
+        self._pan_last = None
+
+    def _on_arrow(self, event):
+        step = 30.0
+        W = self._world_bbox[2] * self._zoom
+        H = self._world_bbox[3] * self._zoom
+        if   event.keysym == 'Left':  self.xview_moveto(max(0.0, self.xview()[0] - step/W))
+        elif event.keysym == 'Right': self.xview_moveto(min(1.0, self.xview()[0] + step/W))
+        elif event.keysym == 'Up':    self.yview_moveto(max(0.0, self.yview()[0] - step/H))
+        elif event.keysym == 'Down':  self.yview_moveto(min(1.0, self.yview()[0] + step/H))
+
     def _dbl_click(self, event):
-        x, y = self._cx(event.x), self._cy(event.y)
+        x, y = self._cx(event.x) / self._zoom, self._cy(event.y) / self._zoom
         for node in reversed(list(self.nodes.values())):
             if node.hit_test(x, y):
                 self._edit_node_dialog(node)
@@ -606,14 +697,12 @@ class NetworkCanvas(tk.Canvas):
         self._sel_edge = None
         self.redraw()
 
-    def _create_edge(self, src_id, dst_id):
-        # Prevent duplicate
+    def _create_edge(self, src_id, dst_id, src_dir=None, dst_dir=None):
         if any(e.src == src_id and e.dst == dst_id for e in self.edges.values()):
             return
-        # Prevent self-loop
         if src_id == dst_id:
             return
-        edge = NetworkEdge(src_id, dst_id)
+        edge = NetworkEdge(src_id, dst_id, src_dir, dst_dir)
         self.edges[edge.id] = edge
         self.redraw()
 
@@ -749,18 +838,70 @@ class NetworkCanvas(tk.Canvas):
 
     def _auto_layout(self):
         if not self.nodes: return
-        names  = {n.id: n.name for n in self.nodes.values()}
-        preds  = {n.id: [] for n in self.nodes.values()}
-        succs  = {n.id: [] for n in self.nodes.values()}
+        preds = {n.id: [] for n in self.nodes.values()}
+        succs = {n.id: [] for n in self.nodes.values()}
         for e in self.edges.values():
             if e.src in preds and e.dst in preds:
                 preds[e.dst].append(e.src)
                 succs[e.src].append(e.dst)
 
-        # BFS-based level assignment (longest path from source)
-        levels = {n.id: 0 for n in self.nodes.values()}
+        outlets = [n.id for n in self.nodes.values() if n.type == 'OUTLET']
+        if not outlets:
+            self._layout_bfs(preds, succs); return
+        outlet_id = outlets[0]
+
+        # Longest-path depth from each node to outlet (reverse BFS)
+        depth = {outlet_id: 0}
+        queue = [outlet_id]
+        while queue:
+            nid = queue.pop(0)
+            for c in preds[nid]:
+                nd = depth[nid] + 1
+                if nd > depth.get(c, -1):
+                    depth[c] = nd
+                    queue.append(c)
+        for n in self.nodes.values():
+            if n.id not in depth:
+                depth[n.id] = 0
+        max_depth = max(depth.values()) if depth else 0
+
+        STEP_X = 160; STEP_Y = 75; MARGIN_X = 100; MARGIN_Y = 80
+        y_cursor = [float(MARGIN_Y)]
+        positions = {}
+        visited   = set()
+
+        def assign(nid):
+            if nid in visited: return
+            visited.add(nid)
+            children = preds[nid]
+            x = MARGIN_X + (max_depth - depth[nid]) * STEP_X
+            if not children:
+                y = y_cursor[0]
+                y_cursor[0] += STEP_Y
+            else:
+                for c in children:
+                    assign(c)
+                cy = [positions[c][1] for c in children if c in positions]
+                y = (min(cy) + max(cy)) / 2.0 if cy else y_cursor[0]
+            positions[nid] = (x, y)
+
+        assign(outlet_id)
+        for nid, (x, y) in positions.items():
+            if nid in self.nodes:
+                self.nodes[nid].x = x
+                self.nodes[nid].y = y
+        max_x = max((x for x, y in positions.values()), default=1000) + 250
+        max_y = max((y for x, y in positions.values()), default=800)  + 200
+        self._world_bbox = (0, 0, int(max(max_x, 2000)), int(max(max_y, 900)))
+        W = self._world_bbox[2] * self._zoom
+        H = self._world_bbox[3] * self._zoom
+        self.configure(scrollregion=(0, 0, int(W), int(H)))
+
+    def _layout_bfs(self, preds, succs):
+        """Fallback BFS level layout for networks without a clear outlet."""
+        levels  = {n.id: 0 for n in self.nodes.values()}
         sources = [n.id for n in self.nodes.values() if not preds[n.id]]
-        queue = list(sources)
+        queue   = list(sources)
         while queue:
             nid = queue.pop(0)
             for s in succs[nid]:
@@ -768,11 +909,9 @@ class NetworkCanvas(tk.Canvas):
                 if lv > levels[s]:
                     levels[s] = lv
                     queue.append(s)
-
         by_level = {}
         for nid, lv in levels.items():
             by_level.setdefault(lv, []).append(nid)
-
         STEP_X = 170; STEP_Y = 85; MARGIN_X = 120; MARGIN_Y = 80
         for lv, nids in sorted(by_level.items()):
             x = MARGIN_X + lv * STEP_X
@@ -1094,10 +1233,6 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._canvas.configure(scrollregion=(0, 0, 3000, 1200))
         xsb.configure(command=self._canvas.xview)
         ysb.configure(command=self._canvas.yview)
-
-        # Mouse-wheel scroll
-        self._canvas.bind('<MouseWheel>',
-                          lambda e: self._canvas.yview_scroll(-1 if e.delta > 0 else 1, 'units'))
 
         # Toolbar below canvas
         toolbar = ctk.CTkFrame(self, height=42, corner_radius=0, fg_color='#1a1a2e')
