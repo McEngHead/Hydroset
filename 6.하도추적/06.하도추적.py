@@ -342,6 +342,9 @@ class NetworkCanvas(tk.Canvas):
         self._world_bbox = (0, 0, 3000, 1200)
         self._pan_last   = None
         self._snap_on    = True
+        self._sel_nodes    = set()   # ids of multi-selected nodes
+        self._rubber_start = None    # world (wx,wy) where rubber-band drag started
+        self._multi_origin = {}      # {node_id:(ox,oy)} for multi-drag
 
         self.bind('<Button-1>',        self._click)
         self.bind('<B1-Motion>',       self._drag)
@@ -381,6 +384,8 @@ class NetworkCanvas(tk.Canvas):
         self._draw_nodes()
         if self._mode == 'connect' and self._conn_src:
             self._draw_rubber_band()
+        if self._rubber_start:
+            self._draw_sel_box()
 
     def _draw_grid(self):
         w = max(self.winfo_width(),  self.winfo_reqwidth(),  100)
@@ -417,11 +422,19 @@ class NetworkCanvas(tk.Canvas):
         for node in self.nodes.values():
             self._draw_node(node)
 
+    def _draw_sel_box(self):
+        """Draw rubber-band selection rectangle."""
+        z = self._zoom
+        x0w, y0w = self._rubber_start
+        x1w, y1w = self._mouse_xy
+        self.create_rectangle(x0w*z, y0w*z, x1w*z, y1w*z,
+                              outline='#5dade2', width=1, dash=(4,3))
+
     def _draw_node(self, node):
         style = NODE_STYLES.get(node.type, {})
         fill    = style.get('fill',    '#333333')
         outline = style.get('outline', '#ffffff')
-        sel = self._sel_node and self._sel_node.id == node.id
+        sel = (self._sel_node and self._sel_node.id == node.id) or (node.id in self._sel_nodes)
         if sel:
             outline = '#f39c12'
         lw = max(1, int((3 if sel else 2) * self._zoom))
@@ -649,10 +662,18 @@ class NetworkCanvas(tk.Canvas):
         # 2. Check node bodies
         for node in reversed(list(self.nodes.values())):
             if node.hit_test(x, y):
-                self._sel_node = node
-                self._sel_edge = None
-                self._drag_start = (x, y, node.x, node.y)
-                if self._on_select: self._on_select(node)
+                if self._sel_nodes and node.id in self._sel_nodes:
+                    # Start multi-drag — keep entire selection
+                    self._drag_start = (x, y, node.x, node.y)
+                    self._multi_origin = {nid: (self.nodes[nid].x, self.nodes[nid].y)
+                                          for nid in self._sel_nodes if nid in self.nodes}
+                else:
+                    self._sel_nodes.clear()
+                    self._multi_origin = {}
+                    self._sel_node = node
+                    self._sel_edge = None
+                    self._drag_start = (x, y, node.x, node.y)
+                    if self._on_select: self._on_select(node)
                 self.redraw()
                 return
 
@@ -671,32 +692,81 @@ class NetworkCanvas(tk.Canvas):
                     self.redraw()
                     return
 
-        # 4. Nothing hit — deselect
+        # 4. Nothing hit — start rubber-band selection
         self._sel_node = None
         self._sel_edge = None
+        self._sel_nodes.clear()
+        self._rubber_start = (x, y)
         if self._on_select: self._on_select(None)
         self.redraw()
 
     def _drag(self, event):
-        if self._drag_start and self._sel_node:
-            z = self._zoom
-            x, y = self._cx(event.x) / z, self._cy(event.y) / z
-            nx = self._drag_start[2] + (x - self._drag_start[0])
-            ny = self._drag_start[3] + (y - self._drag_start[1])
-            if self._snap_on:
-                nx, ny = self._snap(nx), self._snap(ny)
-            self._sel_node.x = nx
-            self._sel_node.y = ny
+        z = self._zoom
+        x, y = self._cx(event.x) / z, self._cy(event.y) / z
+        if self._rubber_start:
+            self._mouse_xy = (x, y)
+            self.redraw()
+            return
+        if self._drag_start:
+            dx = x - self._drag_start[0]
+            dy = y - self._drag_start[1]
+            if self._multi_origin:
+                for nid, (ox, oy) in self._multi_origin.items():
+                    node = self.nodes.get(nid)
+                    if node:
+                        nx = ox + dx
+                        ny = oy + dy
+                        if self._snap_on:
+                            nx, ny = self._snap(nx), self._snap(ny)
+                        node.x, node.y = nx, ny
+            elif self._sel_node:
+                nx = self._drag_start[2] + dx
+                ny = self._drag_start[3] + dy
+                if self._snap_on:
+                    nx, ny = self._snap(nx), self._snap(ny)
+                self._sel_node.x = nx
+                self._sel_node.y = ny
             self.redraw()
 
     def _release(self, event):
-        self._drag_start = None
+        if self._rubber_start:
+            z = self._zoom
+            x = self._cx(event.x) / z
+            y = self._cy(event.y) / z
+            x0, y0 = self._rubber_start
+            xmin, xmax = min(x0, x), max(x0, x)
+            ymin, ymax = min(y0, y), max(y0, y)
+            self._rubber_start = None
+            if xmax - xmin > 4 or ymax - ymin > 4:
+                hit = {n.id for n in self.nodes.values()
+                       if xmin <= n.x <= xmax and ymin <= n.y <= ymax}
+                if len(hit) == 1:
+                    nid = next(iter(hit))
+                    self._sel_node = self.nodes.get(nid)
+                    self._sel_nodes.clear()
+                    if self._on_select: self._on_select(self._sel_node)
+                elif hit:
+                    self._sel_nodes = hit
+                    self._sel_node  = None
+                    if self._on_select: self._on_select(None)
+            self.redraw()
+        self._drag_start   = None
+        self._multi_origin = {}
 
     def _delete(self, event):
         if self._sel_edge:
             eid = self._sel_edge.id
             if eid in self.edges: del self.edges[eid]
             self._sel_edge = None
+            self.redraw()
+        elif self._sel_nodes:
+            for nid in list(self._sel_nodes):
+                for eid in [e for e, ed in self.edges.items() if ed.src == nid or ed.dst == nid]:
+                    del self.edges[eid]
+                if nid in self.nodes:
+                    del self.nodes[nid]
+            self._sel_nodes.clear()
+            if self._on_select: self._on_select(None)
             self.redraw()
         elif self._sel_node:
             nid = self._sel_node.id
@@ -1615,10 +1685,15 @@ class FloodRoutingApp(ctk.CTk):
     def _open_editor(self):
         if self._editor and self._editor.winfo_exists():
             self._editor.lift()
+            self._editor.focus_force()
             return
         self._editor = NetworkEditorWindow(self, on_apply=self._on_network_applied)
         if self.operations:
             self._editor.load_operations(self.operations)
+        self._editor.after(100, lambda: (
+            self._editor.lift(),
+            self._editor.focus_force()
+        ) if self._editor and self._editor.winfo_exists() else None)
 
     def _on_network_applied(self, ops):
         self.operations = ops
