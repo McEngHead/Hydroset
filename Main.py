@@ -41,7 +41,7 @@ class HydroAnalysisApp(ctk.CTk):
         self.change_title_bar_color()
 
         # 2. 기본 경로 및 변수 설정
-        self.base_path = os.getcwd()
+        self.base_path = os.path.dirname(os.path.abspath(__file__))
         self.projects_root_folder = os.path.join(self.base_path, "0.Projects")
         self.current_project_name = None
         self.current_project_path = None
@@ -219,7 +219,7 @@ class HydroAnalysisApp(ctk.CTk):
         예: step_num=1 -> "1."으로 시작하는 폴더(1.강우자료수집) 안의 "01."으로 시작하는 파일 찾음.
         """
         folder_prefix = f"{step_num}."
-        dirs = [d for d in os.listdir(self.base_path) if os.path.isdir(d) and d.startswith(folder_prefix)]
+        dirs = [d for d in os.listdir(self.base_path) if os.path.isdir(os.path.join(self.base_path, d)) and d.startswith(folder_prefix)]
         if not dirs: return None, None, f"'{folder_prefix}'로 시작하는 폴더 없음"
         
         target_folder = dirs[0]
