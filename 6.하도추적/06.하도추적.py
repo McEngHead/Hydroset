@@ -11,7 +11,7 @@ Hydro Analysis System  Module 6
   안정 조건: 2Kx ≤ Δt ≤ 2K(1-x)
 """
 
-import os, sys, json, traceback, warnings, copy
+import os, sys, json, traceback, warnings, copy, math
 import numpy as np
 from datetime import datetime
 from ctypes import windll, byref, sizeof, c_int
@@ -51,11 +51,13 @@ HUFF_PRESETS = {
 
 # 노드 타입별 스타일
 NODE_STYLES = {
-    'SUBBASIN': {'label': '소유역',   'fill': '#1d5c33', 'outline': '#27ae60', 'shape': 'round_rect'},
-    'REACH':    {'label': '하도추적', 'fill': '#1a2d4a', 'outline': '#2980b9', 'shape': 'parallelogram'},
-    'JUNCTION': {'label': '합류점',   'fill': '#1c3d5a', 'outline': '#5dade2', 'shape': 'circle'},
-    'OUTLET':   {'label': '출구',     'fill': '#4a1c6e', 'outline': '#8e44ad', 'shape': 'rect'},
+    'SUBBASIN':  {'label': '소유역',  'fill': '#1d5c33', 'outline': '#27ae60', 'shape': 'round_rect'},
+    'RESERVOIR': {'label': '저수지',  'fill': '#0d3b5e', 'outline': '#2e86de', 'shape': 'hexagon'},
+    'JUNCTION':  {'label': '합류점',  'fill': '#1c3d5a', 'outline': '#5dade2', 'shape': 'circle'},
+    'OUTLET':    {'label': '출구',    'fill': '#4a1c6e', 'outline': '#8e44ad', 'shape': 'rect'},
 }
+# Backward-compat style entry for any old REACH nodes that might still be in memory
+_REACH_STYLE = {'label': '하도추적', 'fill': '#1a2d4a', 'outline': '#2980b9', 'shape': 'parallelogram'}
 
 # =============================================================================
 # 머스킹엄 추적 엔진
@@ -106,6 +108,55 @@ class MuskingumEngine:
                     O_prev = C1 * I1s + C2 * I0s + C3 * O_prev
             outflow[i] = max(0.0, O_prev)
         return outflow, stable, warns, C1, C2, C3, NSTPS
+
+
+class ReservoirEngine:
+    """Modified Puls (Storage-Indication Method) 저수지추적."""
+
+    @staticmethod
+    def _build_si(A_avg, Cd, L, Hc, dt):
+        """Build (SI, Q) arrays vs H (200 points, H from 0 to 3*Hc+5)."""
+        Hmax = max(Hc * 3.0 + 5.0, 10.0)
+        H  = np.linspace(0.0, Hmax, 300)
+        S  = A_avg * H
+        Q  = np.where(H > Hc, Cd * L * (H - Hc) ** 1.5, 0.0)
+        SI = 2.0 * S / dt + Q
+        return SI, Q, H
+
+    @staticmethod
+    def route(inflow, A_avg, Cd, L, Hc, S0, dt_hr, NQ=None):
+        """
+        Modified Puls routing.
+        inflow  : array (m³/s)
+        A_avg   : average surface area (m²)
+        Cd, L   : spillway discharge coef, length (m)
+        Hc      : spillway crest height above bottom (m)
+        S0      : initial storage (m³)
+        dt_hr   : time step (hours)
+        Returns : outflow array (m³/s)
+        """
+        if NQ is None:
+            NQ = len(inflow)
+        dt = dt_hr * 3600.0
+        SI_tbl, Q_tbl, H_tbl = ReservoirEngine._build_si(A_avg, Cd, L, Hc, dt)
+
+        H0 = S0 / max(A_avg, 1.0)
+        O0 = float(np.interp(H0, H_tbl, Q_tbl))
+        # Initial SI value: 2*S0/dt + O0
+        si_prev = 2.0 * S0 / dt + O0
+        O_prev  = O0
+
+        outflow = np.zeros(NQ)
+        for i in range(NQ):
+            I1  = float(inflow[i - 1]) if i > 0 else 0.0
+            I2  = float(inflow[i])     if i < len(inflow) else 0.0
+            # 2S1/dt - O1 = SI_prev - 2*O_prev
+            rhs = max(0.0, I1 + I2 + si_prev - 2.0 * O_prev)
+            O2  = float(np.interp(rhs, SI_tbl, Q_tbl))
+            si_prev = rhs   # = 2S2/dt + O2
+            O_prev  = O2
+            outflow[i] = O2
+        return outflow
 
 
 # =============================================================================
@@ -242,6 +293,23 @@ class HydroNetworkProcessor:
                 self.summary.append({'op': f'{N}개 합류', 'station': name,
                     'peak_q': float(combined[pidx]), 'peak_hr': pidx * dt_hr, 'cum_area': cum_area})
 
+            elif t == 'RESERVOIR':
+                if not stack:
+                    self.warnings.append(f"[{name}] 저수지추적 오류: 스택 비어있음"); continue
+                A_avg = float(op.get('A_avg', 10000.0))
+                Cd    = float(op.get('Cd',    0.42))
+                L     = float(op.get('L',     10.0))
+                Hc    = float(op.get('Hc',    3.0))
+                S0    = float(op.get('S0',    0.0))
+                inflow  = stack.pop()
+                outflow = ReservoirEngine.route(inflow, A_avg, Cd, L, Hc, S0, dt_hr, NQ)
+                stack.append(outflow.copy())
+                pidx = int(np.argmax(outflow))
+                self.results[name] = {'flow': outflow, 'type': 'RESERVOIR',
+                    'peak_q': float(outflow[pidx]), 'peak_hr': pidx * dt_hr, 'cum_area': cum_area}
+                self.summary.append({'op': f'저수지추적(Cd={Cd:.2f},L={L:.1f}m)', 'station': name,
+                    'peak_q': float(outflow[pidx]), 'peak_hr': pidx * dt_hr, 'cum_area': cum_area})
+
         if stack and baseflow > 0.0:
             stack[-1] += baseflow
             last_name = self.summary[-1]['station'] if self.summary else None
@@ -275,13 +343,15 @@ class NetworkNode:
     def _default_params(self):
         if self.type == 'SUBBASIN':
             return {'A': 10.0, 'PB': 200.0, 'CN': 80.0, 'Tc': 1.0, 'R': 1.5}
-        elif self.type == 'REACH':
+        elif self.type == 'RESERVOIR':
+            return {'A_avg': 10000.0, 'Cd': 0.42, 'L': 10.0, 'Hc': 3.0, 'S0': 0.0}
+        elif self.type == 'REACH':   # backward compat
             return {'K': 1.0, 'X': 0.20, 'NSTPS': 0}
         return {}
 
     # Half-sizes for hit-testing
-    _HW = {'SUBBASIN': 58, 'REACH': 62, 'JUNCTION': 28, 'OUTLET': 30}
-    _HH = {'SUBBASIN': 26, 'REACH': 20, 'JUNCTION': 28, 'OUTLET': 26}
+    _HW = {'SUBBASIN': 58, 'RESERVOIR': 52, 'REACH': 62, 'JUNCTION': 28, 'OUTLET': 30}
+    _HH = {'SUBBASIN': 26, 'RESERVOIR': 26, 'REACH': 20, 'JUNCTION': 28, 'OUTLET': 26}
 
     def hit_test(self, px, py):
         hw = self._HW.get(self.type, 40)
@@ -305,13 +375,15 @@ class NetworkNode:
 class NetworkEdge:
     _counter = 0
 
-    def __init__(self, src_id, dst_id, src_dir=None, dst_dir=None):
+    def __init__(self, src_id, dst_id, src_dir=None, dst_dir=None, reach_params=None, label=None):
         NetworkEdge._counter += 1
-        self.id      = NetworkEdge._counter
-        self.src     = src_id
-        self.dst     = dst_id
-        self.src_dir = src_dir  # 'E','W','N','S' or None=auto
-        self.dst_dir = dst_dir
+        self.id           = NetworkEdge._counter
+        self.src          = src_id
+        self.dst          = dst_id
+        self.src_dir      = src_dir   # 'E','W','N','S' or None=auto
+        self.dst_dir      = dst_dir
+        self.reach_params = reach_params  # dict {'K','X','NSTPS'} or None
+        self.label        = label         # display name for reach edge
 
 
 # =============================================================================
@@ -326,7 +398,7 @@ class NetworkCanvas(tk.Canvas):
 
     GRID = 40
 
-    def __init__(self, master, on_select=None, **kwargs):
+    def __init__(self, master, on_select=None, on_edge_select=None, **kwargs):
         super().__init__(master, bg='#12121e', highlightthickness=0, **kwargs)
         self.nodes   = {}   # id -> NetworkNode
         self.edges   = {}   # id -> NetworkEdge
@@ -334,10 +406,12 @@ class NetworkCanvas(tk.Canvas):
         self._sel_edge = None
         self._mode     = 'select'
         self._drag_start = None       # (ex, ey, nx, ny)
-        self._conn_src     = None       # node id being connected from
-        self._conn_src_dir = None       # direction of connection start
-        self._mouse_xy   = (0, 0)
-        self._on_select  = on_select  # callback(node or None)
+        self._conn_src      = None       # node id being connected from
+        self._conn_src_dir  = None       # direction of connection start
+        self._conn_reach    = False      # True → next created edge gets reach_params
+        self._mouse_xy      = (0, 0)
+        self._on_select      = on_select       # callback(node or None)
+        self._on_edge_select = on_edge_select  # callback(edge or None)
         self._zoom       = 1.0
         self._world_bbox = (0, 0, 3000, 1200)
         self._pan_last   = None
@@ -417,6 +491,26 @@ class NetworkCanvas(tk.Canvas):
             col = '#f39c12' if sel else '#3498db'
             lw  = 2 if sel else 1
             self._draw_ortho_edge(x1, y1, sd, x2, y2, dd, col, lw, f'edge_{edge.id}', CR)
+            if edge.reach_params:
+                self._draw_reach_label(wx1, wy1, wx2, wy2, edge, z, f'edge_{edge.id}')
+
+    def _draw_reach_label(self, wx1, wy1, wx2, wy2, edge, z, tag):
+        """Draw parallelogram label at edge midpoint for reach edges."""
+        mx = (wx1 + wx2) / 2 * z
+        my = (wy1 + wy2) / 2 * z
+        hw = 28 * z
+        hh = 11 * z
+        off = 7 * z
+        pts = [mx-hw+off, my-hh, mx+hw+off, my-hh, mx+hw-off, my+hh, mx-hw-off, my+hh]
+        sel = self._sel_edge and self._sel_edge.id == edge.id
+        fill_c = '#1a2d4a'
+        out_c  = '#f39c12' if sel else '#2980b9'
+        lw2 = max(1, int((2 if sel else 1.5) * z))
+        self.create_polygon(*pts, fill=fill_c, outline=out_c, width=lw2, tags=tag)
+        fs = min(max(6, int(8 * z)), 13)
+        lbl = edge.label or 'RC'
+        self.create_text(mx, my, text=lbl, fill='white',
+                         font=('맑은 고딕', fs, 'bold'), tags=tag)
 
     def _draw_nodes(self):
         for node in self.nodes.values():
@@ -431,7 +525,8 @@ class NetworkCanvas(tk.Canvas):
                               outline='#5dade2', width=1, dash=(4,3))
 
     def _draw_node(self, node):
-        style = NODE_STYLES.get(node.type, {})
+        style = NODE_STYLES.get(node.type) or (
+            _REACH_STYLE if node.type == 'REACH' else {})
         fill    = style.get('fill',    '#333333')
         outline = style.get('outline', '#ffffff')
         sel = (self._sel_node and self._sel_node.id == node.id) or (node.id in self._sel_nodes)
@@ -448,7 +543,13 @@ class NetworkCanvas(tk.Canvas):
         if node.type == 'SUBBASIN':
             self._round_rect(x-hw, y-hh, x+hw, y+hh, 10*z,
                              fill=fill, outline=outline, width=lw, tags=tag)
-        elif node.type == 'REACH':
+        elif node.type == 'RESERVOIR':
+            pts = []
+            for i in range(6):
+                ang = math.pi / 2 + i * math.pi / 3
+                pts.extend([x + hw * math.cos(ang), y + hh * math.sin(ang)])
+            self.create_polygon(*pts, fill=fill, outline=outline, width=lw, tags=tag)
+        elif node.type == 'REACH':   # backward compat (old loaded nodes)
             off = 10 * z
             pts = [x-hw+off, y-hh, x+hw+off, y-hh, x+hw-off, y+hh, x-hw-off, y+hh]
             self.create_polygon(*pts, fill=fill, outline=outline, width=lw, tags=tag)
@@ -689,6 +790,7 @@ class NetworkCanvas(tk.Canvas):
                     self._sel_edge = edge
                     self._sel_node = None
                     if self._on_select: self._on_select(None)
+                    if self._on_edge_select: self._on_edge_select(edge)
                     self.redraw()
                     return
 
@@ -843,7 +945,7 @@ class NetworkCanvas(tk.Canvas):
         if self._snap_on:
             x, y = self._snap(x), self._snap(y)
         count = sum(1 for n in self.nodes.values() if n.type == ntype) + 1
-        prefix = {'SUBBASIN': 'SB', 'REACH': 'RC', 'JUNCTION': 'JN', 'OUTLET': 'OUT'}
+        prefix = {'SUBBASIN': 'SB', 'RESERVOIR': 'RS', 'JUNCTION': 'JN', 'OUTLET': 'OUT'}
         name = f"{prefix.get(ntype,'ND')}{count:02d}"
         node = NetworkNode(ntype, name, x, y)
         self.nodes[node.id] = node
@@ -857,11 +959,17 @@ class NetworkCanvas(tk.Canvas):
 
     def _create_edge(self, src_id, dst_id, src_dir=None, dst_dir=None):
         if any(e.src == src_id and e.dst == dst_id for e in self.edges.values()):
+            self._conn_reach = False
             return
         if src_id == dst_id:
+            self._conn_reach = False
             return
-        edge = NetworkEdge(src_id, dst_id, src_dir, dst_dir)
+        rp = {'K': 1.0, 'X': 0.20, 'NSTPS': 0} if self._conn_reach else None
+        cnt = sum(1 for e in self.edges.values() if e.reach_params) + 1
+        lbl = f'RC{cnt:02d}' if rp else None
+        edge = NetworkEdge(src_id, dst_id, src_dir, dst_dir, reach_params=rp, label=lbl)
         self.edges[edge.id] = edge
+        self._conn_reach = False
         self.redraw()
 
     def _edit_node_dialog(self, node):
@@ -900,6 +1008,18 @@ class NetworkCanvas(tk.Canvas):
         visited = set()
         errors  = []
 
+        # Build edge lookup: (src_id, dst_id) -> edge
+        edge_map = {(e.src, e.dst): e for e in self.edges.values()}
+
+        def emit_reach(uid, dst_id):
+            """If edge uid→dst_id has reach_params, emit ROUTE op."""
+            e = edge_map.get((uid, dst_id))
+            if e and e.reach_params:
+                rp = e.reach_params
+                ops.append({'type': 'ROUTE', 'name': e.label or f'RC_{uid}_{dst_id}',
+                             'K': rp.get('K', 1.0), 'X': rp.get('X', 0.20),
+                             'NSTPS': rp.get('NSTPS', 0)})
+
         def dfs(nid):
             if nid in visited:
                 errors.append(f"순환 연결 감지: {self.nodes[nid].name}")
@@ -912,7 +1032,13 @@ class NetworkCanvas(tk.Canvas):
             if node.type == 'SUBBASIN':
                 ops.append({'type': 'BASIN', 'name': node.name, **node.params})
 
-            elif node.type == 'REACH':
+            elif node.type == 'RESERVOIR':
+                for uid in up_ids:
+                    dfs(uid)
+                    emit_reach(uid, nid)
+                ops.append({'type': 'RESERVOIR', 'name': node.name, **node.params})
+
+            elif node.type == 'REACH':   # backward compat for old loaded nodes
                 for uid in up_ids:
                     dfs(uid)
                 ops.append({'type': 'ROUTE', 'name': node.name, **node.params})
@@ -920,17 +1046,19 @@ class NetworkCanvas(tk.Canvas):
             elif node.type == 'JUNCTION':
                 for uid in up_ids:
                     dfs(uid)
+                    emit_reach(uid, nid)
                 N = len(up_ids)
                 if N >= 2:
                     ops.append({'type': 'COMBINE', 'name': node.name, 'N': N})
                 elif N == 1:
-                    pass  # pass-through, no combine needed
+                    pass
                 else:
                     errors.append(f"합류점 '{node.name}' 에 입력 없음")
 
             elif node.type == 'OUTLET':
                 for uid in up_ids:
                     dfs(uid)
+                    emit_reach(uid, nid)
                 N = len(up_ids)
                 if N >= 2:
                     ops.append({'type': 'COMBINE', 'name': node.name, 'N': N})
@@ -946,11 +1074,15 @@ class NetworkCanvas(tk.Canvas):
     def load_operations(self, operations):
         """Convert flat operations list → visual graph with auto-layout."""
         self.clear()
-        stack_names = []  # stack of node names
-        name_to_node = {}
+        # stack of node names (strings)
+        stack  = []
+        # pending reach: if the top of stack has a ROUTE op applied,
+        # store it as pending_reach[(src_name)] = (reach_name, reach_params)
+        pending_reach = {}   # src_name -> (reach_name, reach_params)
+        name_to_node  = {}
 
         for op in operations:
-            t = op['type']
+            t  = op['type']
             nm = op['name']
             params = {k: v for k, v in op.items() if k not in ('type', 'name')}
 
@@ -958,38 +1090,70 @@ class NetworkCanvas(tk.Canvas):
                 node = NetworkNode('SUBBASIN', nm, 0, 0, params)
                 self.nodes[node.id] = node
                 name_to_node[nm] = node
-                stack_names.append(nm)
+                stack.append(nm)
 
             elif t == 'ROUTE':
-                node = NetworkNode('REACH', nm, 0, 0, params)
+                # Mark the top-of-stack node as having a pending reach
+                if stack:
+                    src = stack[-1]
+                    rp = {'K': params.get('K', 1.0), 'X': params.get('X', 0.20),
+                          'NSTPS': params.get('NSTPS', 0)}
+                    pending_reach[src] = (nm, rp)
+                    # keep the same src name on the stack (the reach is on the edge, not a node)
+
+            elif t == 'RESERVOIR':
+                node = NetworkNode('RESERVOIR', nm, 0, 0, params)
                 self.nodes[node.id] = node
                 name_to_node[nm] = node
-                if stack_names:
-                    prev = stack_names.pop()
-                    edge = NetworkEdge(name_to_node[prev].id, node.id)
+                if stack:
+                    prev = stack.pop()
+                    pr = pending_reach.pop(prev, None)
+                    if pr:
+                        reach_nm, rp = pr
+                        edge = NetworkEdge(name_to_node[prev].id, node.id,
+                                           reach_params=rp, label=reach_nm)
+                    else:
+                        edge = NetworkEdge(name_to_node[prev].id, node.id)
                     self.edges[edge.id] = edge
-                stack_names.append(nm)
+                stack.append(nm)
 
             elif t == 'COMBINE':
                 N = int(op.get('N', 2))
                 node = NetworkNode('JUNCTION', nm, 0, 0, {})
                 self.nodes[node.id] = node
                 name_to_node[nm] = node
-                pop_n = min(N, len(stack_names))
+                pop_n = min(N, len(stack))
                 for _ in range(pop_n):
-                    prev = stack_names.pop()
-                    edge = NetworkEdge(name_to_node[prev].id, node.id)
-                    self.edges[edge.id] = edge
-                stack_names.append(nm)
+                    prev = stack.pop()
+                    pr = pending_reach.pop(prev, None)
+                    if pr:
+                        reach_nm, rp = pr
+                        if prev in name_to_node:
+                            edge = NetworkEdge(name_to_node[prev].id, node.id,
+                                               reach_params=rp, label=reach_nm)
+                            self.edges[edge.id] = edge
+                    else:
+                        if prev in name_to_node:
+                            edge = NetworkEdge(name_to_node[prev].id, node.id)
+                            self.edges[edge.id] = edge
+                stack.append(nm)
 
-        # Add OUTLET for whatever is left on stack
-        if stack_names:
-            last_nm = stack_names[-1]
+        # Add OUTLET for last item on stack
+        if stack:
+            last_nm = stack[-1]
             out_node = NetworkNode('OUTLET', 'OUT', 0, 0, {})
             self.nodes[out_node.id] = out_node
-            name_to_node['OUT'] = out_node
-            edge = NetworkEdge(name_to_node[last_nm].id, out_node.id)
-            self.edges[edge.id] = edge
+            pr = pending_reach.pop(last_nm, None)
+            if pr and last_nm in name_to_node:
+                reach_nm, rp = pr
+                edge = NetworkEdge(name_to_node[last_nm].id, out_node.id,
+                                   reach_params=rp, label=reach_nm)
+            elif last_nm in name_to_node:
+                edge = NetworkEdge(name_to_node[last_nm].id, out_node.id)
+            else:
+                edge = None
+            if edge:
+                self.edges[edge.id] = edge
 
         self._auto_layout()
         self.redraw()
@@ -1187,7 +1351,11 @@ class PalettePanel(ctk.CTkFrame):
         for ntype, style in NODE_STYLES.items():
             self._item(ntype, style)
 
-        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=10)
+        # Reach edge special button
+        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(10,4))
+        self._item_reach_edge()
+
+        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(4,10))
         ctk.CTkLabel(self, text='클릭 후 캔버스에\n배치하세요',
                      font=('맑은 고딕', 9), text_color='gray',
                      justify='center').pack()
@@ -1209,14 +1377,42 @@ class PalettePanel(ctk.CTkFrame):
             w.bind('<Button-1>', lambda e, t=ntype: self._callback(t))
             w.configure(cursor='hand2')
 
+    def _item_reach_edge(self):
+        frame = ctk.CTkFrame(self, corner_radius=8, fg_color='#1a1a2e',
+                             border_width=1, border_color='#333344')
+        frame.pack(fill='x', padx=8, pady=4)
+
+        mini = tk.Canvas(frame, width=148, height=48, bg='#1a1a2e', highlightthickness=0)
+        mini.pack(pady=(6, 0))
+        # Draw: line → [parallelogram] → arrow
+        cy = 24
+        mini.create_line(4, cy, 44, cy, fill='#2980b9', width=2)
+        off = 6
+        pts = [44+off, cy-12, 104+off, cy-12, 104-off, cy+12, 44-off, cy+12]
+        mini.create_polygon(*pts, fill='#1a2d4a', outline='#2980b9', width=2)
+        mini.create_line(104, cy, 140, cy, fill='#2980b9', width=2,
+                         arrow=tk.LAST, arrowshape=(7, 9, 3))
+        mini.create_text(74, cy, text='하도추적', fill='white',
+                         font=('맑은 고딕', 9, 'bold'))
+
+        lbl = ctk.CTkLabel(frame, text='하도추적 (엣지)',
+                           font=FONT_SMALL, text_color='#2980b9')
+        lbl.pack(pady=(2, 6))
+
+        for w in (frame, mini, lbl):
+            w.bind('<Button-1>', lambda e: self._callback('REACH_EDGE'))
+            w.configure(cursor='hand2')
+
     def _draw_mini(self, c, ntype, style):
         cx, cy = 74, 24
         fill = style['fill']; out = style['outline']
         if ntype == 'SUBBASIN':
             self._round_rect_mini(c, cx-52, cy-17, cx+52, cy+17, 8, fill=fill, outline=out, width=2)
-        elif ntype == 'REACH':
-            off = 8
-            pts = [cx-52+off, cy-14, cx+52+off, cy-14, cx+52-off, cy+14, cx-52-off, cy+14]
+        elif ntype == 'RESERVOIR':
+            pts = []
+            for i in range(6):
+                ang = math.pi / 2 + i * math.pi / 3
+                pts.extend([cx + 26 * math.cos(ang), cy + 20 * math.sin(ang)])
             c.create_polygon(*pts, fill=fill, outline=out, width=2)
         elif ntype == 'JUNCTION':
             c.create_oval(cx-18, cy-18, cx+18, cy+18, fill=fill, outline=out, width=2)
@@ -1240,6 +1436,7 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
     def __init__(self, master, redraw_cb=None, **kwargs):
         super().__init__(master, width=260, **kwargs)
         self._node    = None
+        self._edge    = None
         self._entries = {}
         self._svars   = {}  # slider DoubleVars
         self._redraw  = redraw_cb
@@ -1283,6 +1480,17 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
             self._add_field('유출곡선지수 CN',    'CN', node.params.get('CN', 80.0))
             self._add_field('도달시간 Tc (hr)',   'Tc', node.params.get('Tc', 1.0))
             self._add_field('저류상수 R (hr)',    'R',  node.params.get('R',  1.5))
+
+        elif node.type == 'RESERVOIR':
+            self._section('─── 저수지 매개변수 ───')
+            self._add_field('평균 수면적 A_avg (m²)', 'A_avg', node.params.get('A_avg', 10000.0))
+            self._add_field('여수로 방류계수 Cd',      'Cd',    node.params.get('Cd',    0.42))
+            self._add_field('여수로 길이 L (m)',       'L',     node.params.get('L',     10.0))
+            self._add_field('여수로 마루고 Hc (m)',    'Hc',    node.params.get('Hc',    3.0))
+            self._add_field('초기 저류량 S0 (m³)',     'S0',    node.params.get('S0',    0.0))
+            ctk.CTkLabel(self, text='※ Q = Cd×L×(H-Hc)^1.5 (광정위어)\n   S = A_avg × H',
+                         font=('맑은 고딕', 9), text_color='gray',
+                         wraplength=230, justify='left').pack(anchor='w', padx=12, pady=2)
 
         elif node.type == 'REACH':
             self._section('─── 머스킹엄 매개변수 ───')
@@ -1348,6 +1556,64 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
         except ValueError as e:
             messagebox.showerror('입력 오류', str(e))
 
+    def show_edge(self, edge):
+        """Display reach edge properties for editing."""
+        self._node = None
+        self._edge = edge if hasattr(edge, 'reach_params') else None
+        self._entries.clear()
+        self._svars.clear()
+        for w in self.winfo_children(): w.destroy()
+
+        if edge is None or not getattr(edge, 'reach_params', None):
+            self._show_empty()
+            return
+
+        ctk.CTkLabel(self, text='엣지 속성', font=FONT_HEADER,
+                     text_color='#5dade2').pack(anchor='w', padx=12, pady=(14,2))
+        badge = ctk.CTkFrame(self, fg_color='#1a2d4a', corner_radius=6)
+        badge.pack(fill='x', padx=10, pady=4)
+        ctk.CTkLabel(badge, text='▶─[하도추적]─▶',
+                     font=FONT_HEADER, text_color='#2980b9').pack(anchor='w', padx=8, pady=6)
+
+        # Label (reach name)
+        ctk.CTkLabel(self, text='구간 이름', font=FONT_SMALL,
+                     anchor='w').pack(fill='x', padx=12, pady=(4,0))
+        ent_lbl = ctk.CTkEntry(self, font=FONT_SMALL, justify='left')
+        ent_lbl.insert(0, edge.label or '')
+        ent_lbl.pack(fill='x', padx=10, pady=(0,2))
+        self._entries['__label__'] = ent_lbl
+
+        rp = edge.reach_params
+        self._section('─── 머스킹엄 매개변수 ───')
+        self._add_field('저류계수 K (hr)', 'K', rp.get('K', 1.0))
+        self._add_slider('가중계수 X',     'X', rp.get('X', 0.20), 0.0, 0.5)
+        self._add_field('NSTPS (0=자동)',  'NSTPS', rp.get('NSTPS', 0))
+        ctk.CTkLabel(self, text='※ 안정: 2Kx ≤ Δt ≤ 2K(1-x)',
+                     font=('맑은 고딕', 9), text_color='gray',
+                     wraplength=220).pack(anchor='w', padx=12, pady=2)
+
+        ctk.CTkButton(self, text='적용', command=self._apply_edge,
+                      font=FONT_BTN, fg_color='#27ae60', hover_color='#2ecc71',
+                      height=34).pack(fill='x', padx=10, pady=(14, 4))
+
+    def _apply_edge(self):
+        edge = getattr(self, '_edge', None)
+        if not edge or not edge.reach_params: return
+        try:
+            lbl_ent = self._entries.get('__label__')
+            if lbl_ent:
+                v = lbl_ent.get().strip()
+                if v: edge.label = v
+            for key, ent in self._entries.items():
+                if key == '__label__': continue
+                v = ent.get().strip()
+                edge.reach_params[key] = int(float(v)) if key == 'NSTPS' else float(v)
+            for key, var in self._svars.items():
+                edge.reach_params[key] = round(float(var.get()), 4)
+            if self._redraw: self._redraw()
+        except ValueError as e:
+            messagebox.showerror('입력 오류', str(e))
+
 
 # =============================================================================
 # 수문망 편집기 창
@@ -1385,6 +1651,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
 
         self._canvas = NetworkCanvas(center,
                                      on_select=self._node_selected,
+                                     on_edge_select=self._edge_selected,
                                      xscrollcommand=xsb.set,
                                      yscrollcommand=ysb.set)
         self._canvas.grid(row=0, column=0, sticky='nsew')
@@ -1401,7 +1668,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._mode_lbl.pack(side='left', padx=12)
 
         ctk.CTkLabel(toolbar,
-                     text='주황 포트 클릭 → 연결  |  노드 드래그=이동  |  Delete=삭제  |  Esc=취소  |  더블클릭=편집',
+                     text='포트 클릭→연결  |  드래그=이동  |  Delete=삭제  |  Esc=취소  |  더블클릭=편집  |  드래그 빈공간=다중선택',
                      font=('맑은 고딕', 9), text_color='gray').pack(side='left', padx=6)
 
         for txt, cmd, col in [
@@ -1434,12 +1701,18 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         except Exception: pass
 
     def _palette_clicked(self, ntype):
+        if ntype == 'REACH_EDGE':
+            self._canvas._conn_reach = True
+            self._canvas.set_mode('select')
+            self._mode_lbl.configure(text='모드: 하도추적 연결 (포트 클릭 → 포트 클릭)')
+            self._canvas.focus_set()
+            return
         self._canvas.set_mode(f'place:{ntype}')
         label_map = {
-            'SUBBASIN': '소유역 배치 중 (캔버스 클릭)',
-            'REACH':    '하도추적 배치 중 (캔버스 클릭)',
-            'JUNCTION': '합류점 배치 중 (캔버스 클릭)',
-            'OUTLET':   '출구 배치 중 (캔버스 클릭)',
+            'SUBBASIN':  '소유역 배치 중 (캔버스 클릭)',
+            'RESERVOIR': '저수지 배치 중 (캔버스 클릭)',
+            'JUNCTION':  '합류점 배치 중 (캔버스 클릭)',
+            'OUTLET':    '출구 배치 중 (캔버스 클릭)',
         }
         self._mode_lbl.configure(text=f'모드: {label_map.get(ntype, ntype)}')
         self._canvas.focus_set()
@@ -1453,6 +1726,11 @@ class NetworkEditorWindow(ctk.CTkToplevel):
 
     def _node_selected(self, node):
         self._props.show_node(node)
+        self._mode_lbl.configure(text='모드: 선택')
+        self._canvas.set_mode('select')
+
+    def _edge_selected(self, edge):
+        self._props.show_edge(edge)
         self._mode_lbl.configure(text='모드: 선택')
         self._canvas.set_mode('select')
 
