@@ -419,6 +419,10 @@ class NetworkCanvas(tk.Canvas):
         self._sel_nodes    = set()   # ids of multi-selected nodes
         self._rubber_start = None    # world (wx,wy) where rubber-band drag started
         self._multi_origin = {}      # {node_id:(ox,oy)} for multi-drag
+        self._undo_stack   = []      # list of (nodes_copy, edges_copy)
+        self._redo_stack   = []
+        self._reach_drag   = None    # (edge, src_ox, src_oy, dst_ox, dst_oy) — reach label drag
+        self._edge_reconnect = None  # {'edge', 'end':'src'|'dst', 'fixed_port':(x,y)}
 
         self.bind('<Button-1>',        self._click)
         self.bind('<B1-Motion>',       self._drag)
@@ -437,6 +441,8 @@ class NetworkCanvas(tk.Canvas):
         self.bind('<Right>',           self._on_arrow)
         self.bind('<Up>',              self._on_arrow)
         self.bind('<Down>',            self._on_arrow)
+        self.bind('<Control-z>',       self._undo)
+        self.bind('<Control-y>',       self._redo)
 
     # ── coordinate helpers ───────────────────────────────────────────────────
 
@@ -460,6 +466,8 @@ class NetworkCanvas(tk.Canvas):
             self._draw_rubber_band()
         if self._rubber_start:
             self._draw_sel_box()
+        if self._edge_reconnect:
+            self._draw_reconnect_preview()
 
     def _draw_grid(self):
         w = max(self.winfo_width(),  self.winfo_reqwidth(),  100)
@@ -493,6 +501,13 @@ class NetworkCanvas(tk.Canvas):
             self._draw_ortho_edge(x1, y1, sd, x2, y2, dd, col, lw, f'edge_{edge.id}', CR)
             if edge.reach_params:
                 self._draw_reach_label(wx1, wy1, wx2, wy2, edge, z, f'edge_{edge.id}')
+            if sel:
+                # 끝점 재연결 핸들 (src=녹색, dst=빨간색)
+                hr = max(5, int(6 * z))
+                self.create_oval(x1-hr, y1-hr, x1+hr, y1+hr,
+                                 fill='#27ae60', outline='white', width=1, tags=f'edge_{edge.id}')
+                self.create_oval(x2-hr, y2-hr, x2+hr, y2+hr,
+                                 fill='#e74c3c', outline='white', width=1, tags=f'edge_{edge.id}')
 
     def _draw_reach_label(self, wx1, wy1, wx2, wy2, edge, z, tag):
         """Draw parallelogram label at edge midpoint for reach edges."""
@@ -523,6 +538,14 @@ class NetworkCanvas(tk.Canvas):
         x1w, y1w = self._mouse_xy
         self.create_rectangle(x0w*z, y0w*z, x1w*z, y1w*z,
                               outline='#5dade2', width=1, dash=(4,3))
+
+    def _draw_reconnect_preview(self):
+        """Draw dashed line from fixed end to mouse during edge reconnect drag."""
+        z  = self._zoom
+        fx, fy = self._edge_reconnect['fixed_port']
+        mx, my = self._mouse_xy
+        self.create_line(fx*z, fy*z, mx*z, my*z,
+                         fill='#f39c12', width=2, dash=(6, 3))
 
     def _draw_node(self, node):
         style = NODE_STYLES.get(node.type) or (
@@ -659,42 +682,12 @@ class NetworkCanvas(tk.Canvas):
         return [(x1,y1),(x1,y2),(x2,y2)]
 
     def _stroke_ortho(self, pts, CR, col, lw, tag):
-        """Draw straight segments with rounded arc corners through waypoints."""
+        """Draw straight orthogonal segments through waypoints (no arc corners)."""
         n = len(pts)
         if n < 2: return
-        DV = {'E':(1,0),'W':(-1,0),'N':(0,-1),'S':(0,1)}
-
-        def dof(i):
-            ax,ay = pts[i]; bx,by = pts[i+1]
-            dx,dy = bx-ax, by-ay
-            return ('E' if dx>=0 else 'W') if abs(dx)>=abs(dy) else ('S' if dy>=0 else 'N')
-
-        dirs = [dof(i) for i in range(n-1)]
-        cx, cy = pts[0]
-        for i in range(n-1):
-            bx, by = pts[i+1]
-            d = dirs[i]
-            is_last = (i == n-2)
-            if is_last:
-                if abs(cx-bx)>0.1 or abs(cy-by)>0.1:
-                    self.create_line(cx,cy,bx,by, fill=col, width=lw,
-                                     arrow=tk.LAST, arrowshape=(7,9,3), tags=tag)
-            else:
-                d_next = dirs[i+1]
-                seg_len = abs(pts[i+1][0]-pts[i][0]) + abs(pts[i+1][1]-pts[i][1])
-                r = min(CR, seg_len/2)
-                dvx,dvy = DV[d]
-                ex,ey = bx - dvx*r, by - dvy*r
-                if abs(cx-ex)>0.1 or abs(cy-ey)>0.1:
-                    self.create_line(cx,cy,ex,ey, fill=col, width=lw, tags=tag)
-                key = (d, d_next)
-                if key in self._ARC_P:
-                    start, extent = self._ARC_P[key]
-                    self.create_arc(bx-r, by-r, bx+r, by+r,
-                                    start=start, extent=extent,
-                                    style=tk.ARC, outline=col, width=lw, tags=tag)
-                dvx2,dvy2 = DV[d_next]
-                cx,cy = bx + dvx2*r, by + dvy2*r
+        flat = [v for p in pts for v in p]
+        self.create_line(*flat, fill=col, width=lw,
+                         arrow=tk.LAST, arrowshape=(7, 9, 3), tags=tag)
 
     def _draw_ortho_edge(self, x1, y1, d1, x2, y2, d2, col, lw, tag, CR):
         OPP = {'E':'W','W':'E','N':'S','S':'N'}
@@ -760,15 +753,59 @@ class NetworkCanvas(tk.Canvas):
                     self.redraw()
                     return
 
-        # 2. Check node bodies
+        # 2. Check selected edge endpoint handles (reconnect drag)
+        if self._sel_edge:
+            edge = self._sel_edge
+            src  = self.nodes.get(edge.src)
+            dst  = self.nodes.get(edge.dst)
+            if src and dst:
+                sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
+                p1 = src.port(sd); p2 = dst.port(dd)
+                HR = 10   # hit radius in world coords
+                for end, px, py in (('src', p1[0], p1[1]), ('dst', p2[0], p2[1])):
+                    if abs(x - px) <= HR and abs(y - py) <= HR:
+                        self._push_undo()
+                        fixed = p2 if end == 'src' else p1
+                        self._edge_reconnect = {
+                            'edge': edge, 'end': end, 'fixed_port': fixed
+                        }
+                        self._drag_start = (x, y, 0, 0)
+                        self.redraw()
+                        return
+
+        # 3. Check reach edge labels (parallelogram) — drag moves src+dst together
+        for edge in self.edges.values():
+            if not edge.reach_params: continue
+            src = self.nodes.get(edge.src)
+            dst = self.nodes.get(edge.dst)
+            if src and dst:
+                sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
+                p1 = src.port(sd); p2 = dst.port(dd)
+                mx = (p1[0] + p2[0]) / 2
+                my = (p1[1] + p2[1]) / 2
+                if abs(x - mx) <= 35 and abs(y - my) <= 13:
+                    self._push_undo()
+                    self._sel_edge = edge
+                    self._sel_node = None
+                    self._sel_nodes.clear()
+                    self._drag_start  = (x, y, 0, 0)
+                    self._reach_drag  = (edge, src.x, src.y, dst.x, dst.y)
+                    if self._on_select: self._on_select(None)
+                    if self._on_edge_select: self._on_edge_select(edge)
+                    self.redraw()
+                    return
+
+        # 3. Check node bodies
         for node in reversed(list(self.nodes.values())):
             if node.hit_test(x, y):
                 if self._sel_nodes and node.id in self._sel_nodes:
                     # Start multi-drag — keep entire selection
+                    self._push_undo()
                     self._drag_start = (x, y, node.x, node.y)
                     self._multi_origin = {nid: (self.nodes[nid].x, self.nodes[nid].y)
                                           for nid in self._sel_nodes if nid in self.nodes}
                 else:
+                    self._push_undo()
                     self._sel_nodes.clear()
                     self._multi_origin = {}
                     self._sel_node = node
@@ -778,15 +815,19 @@ class NetworkCanvas(tk.Canvas):
                 self.redraw()
                 return
 
-        # 3. Check edges (click near midpoint)
+        # 3. Check edges (click near any segment)
+        OPP = {'E':'W','W':'E','N':'S','S':'N'}
         for edge in self.edges.values():
             src = self.nodes.get(edge.src)
             dst = self.nodes.get(edge.dst)
             if src and dst:
                 sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
                 p1 = src.port(sd); p2 = dst.port(dd)
-                mx = (p1[0]+p2[0])/2; my = (p1[1]+p2[1])/2
-                if abs(x-mx) <= 15 and abs(y-my) <= 15:
+                pts = self._ortho_wpts(p1[0], p1[1], sd, p2[0], p2[1], OPP[dd])
+                hit = any(self._pt_seg_dist(x, y, pts[i][0], pts[i][1],
+                                            pts[i+1][0], pts[i+1][1]) <= 8
+                          for i in range(len(pts) - 1))
+                if hit:
                     self._sel_edge = edge
                     self._sel_node = None
                     if self._on_select: self._on_select(None)
@@ -807,6 +848,26 @@ class NetworkCanvas(tk.Canvas):
         x, y = self._cx(event.x) / z, self._cy(event.y) / z
         if self._rubber_start:
             self._mouse_xy = (x, y)
+            self.redraw()
+            return
+        if self._edge_reconnect and self._drag_start:
+            self._mouse_xy = (x, y)
+            self.redraw()
+            return
+        if self._reach_drag and self._drag_start:
+            dx = x - self._drag_start[0]
+            dy = y - self._drag_start[1]
+            edge, sox, soy, dox, doy = self._reach_drag
+            src = self.nodes.get(edge.src)
+            dst = self.nodes.get(edge.dst)
+            if src:
+                nx, ny = sox + dx, soy + dy
+                if self._snap_on: nx, ny = self._snap(nx), self._snap(ny)
+                src.x, src.y = nx, ny
+            if dst:
+                nx, ny = dox + dx, doy + dy
+                if self._snap_on: nx, ny = self._snap(nx), self._snap(ny)
+                dst.x, dst.y = nx, ny
             self.redraw()
             return
         if self._drag_start:
@@ -831,6 +892,35 @@ class NetworkCanvas(tk.Canvas):
             self.redraw()
 
     def _release(self, event):
+        if self._edge_reconnect:
+            z = self._zoom
+            x = self._cx(event.x) / z
+            y = self._cy(event.y) / z
+            info = self._edge_reconnect
+            self._edge_reconnect = None
+            self._drag_start = None
+            # 가장 가까운 포트 탐색 (스냅 거리 20)
+            best_node, best_dir, best_dist = None, None, 20
+            edge = info['edge']
+            for node in self.nodes.values():
+                # src 이동 시 dst 노드 제외, dst 이동 시 src 노드 제외
+                if info['end'] == 'src' and node.id == edge.dst: continue
+                if info['end'] == 'dst' and node.id == edge.src: continue
+                if node.type == 'SUBBASIN' and info['end'] == 'dst': continue
+                for d in ('E', 'W', 'N', 'S'):
+                    px, py = node.port(d)
+                    dist = math.hypot(x - px, y - py)
+                    if dist < best_dist:
+                        best_dist, best_node, best_dir = dist, node, d
+            if best_node:
+                if info['end'] == 'src':
+                    edge.src     = best_node.id
+                    edge.src_dir = best_dir
+                else:
+                    edge.dst     = best_node.id
+                    edge.dst_dir = best_dir
+            self.redraw()
+            return
         if self._rubber_start:
             z = self._zoom
             x = self._cx(event.x) / z
@@ -852,16 +942,20 @@ class NetworkCanvas(tk.Canvas):
                     self._sel_node  = None
                     if self._on_select: self._on_select(None)
             self.redraw()
-        self._drag_start   = None
-        self._multi_origin = {}
+        self._drag_start     = None
+        self._multi_origin   = {}
+        self._reach_drag     = None
+        self._edge_reconnect = None
 
     def _delete(self, event):
         if self._sel_edge:
+            self._push_undo()
             eid = self._sel_edge.id
             if eid in self.edges: del self.edges[eid]
             self._sel_edge = None
             self.redraw()
         elif self._sel_nodes:
+            self._push_undo()
             for nid in list(self._sel_nodes):
                 for eid in [e for e, ed in self.edges.items() if ed.src == nid or ed.dst == nid]:
                     del self.edges[eid]
@@ -871,6 +965,7 @@ class NetworkCanvas(tk.Canvas):
             if self._on_select: self._on_select(None)
             self.redraw()
         elif self._sel_node:
+            self._push_undo()
             nid = self._sel_node.id
             for eid in [eid for eid, e in self.edges.items() if e.src == nid or e.dst == nid]:
                 del self.edges[eid]
@@ -883,6 +978,37 @@ class NetworkCanvas(tk.Canvas):
         self._conn_src = None
         self._conn_src_dir = None
         self.set_mode('select')
+        self.redraw()
+
+    # ── undo / redo ──────────────────────────────────────────────────────────
+
+    def _push_undo(self):
+        state = (copy.deepcopy(self.nodes), copy.deepcopy(self.edges))
+        self._undo_stack.append(state)
+        if len(self._undo_stack) > 50:
+            self._undo_stack.pop(0)
+        self._redo_stack.clear()
+
+    def _undo(self, event=None):
+        if not self._undo_stack: return
+        cur = (copy.deepcopy(self.nodes), copy.deepcopy(self.edges))
+        self._redo_stack.append(cur)
+        self.nodes, self.edges = self._undo_stack.pop()
+        self._sel_node = None
+        self._sel_edge = None
+        self._sel_nodes.clear()
+        if self._on_select: self._on_select(None)
+        self.redraw()
+
+    def _redo(self, event=None):
+        if not self._redo_stack: return
+        cur = (copy.deepcopy(self.nodes), copy.deepcopy(self.edges))
+        self._undo_stack.append(cur)
+        self.nodes, self.edges = self._redo_stack.pop()
+        self._sel_node = None
+        self._sel_edge = None
+        self._sel_nodes.clear()
+        if self._on_select: self._on_select(None)
         self.redraw()
 
     # ── zoom / pan ───────────────────────────────────────────────────────────
@@ -907,17 +1033,11 @@ class NetworkCanvas(tk.Canvas):
 
     def _on_pan_press(self, event):
         self.configure(cursor='fleur')
-        self._pan_last = (event.x, event.y)
+        self.scan_mark(event.x, event.y)
 
     def _on_pan_drag(self, event):
-        if self._pan_last is None: return
-        dx = event.x - self._pan_last[0]
-        dy = event.y - self._pan_last[1]
-        self._pan_last = (event.x, event.y)
-        W = self._world_bbox[2] * self._zoom
-        H = self._world_bbox[3] * self._zoom
-        if W > 0: self.xview_moveto(max(0.0, self.xview()[0] - dx / W))
-        if H > 0: self.yview_moveto(max(0.0, self.yview()[0] - dy / H))
+        self.scan_dragto(event.x, event.y, gain=1)
+        self.redraw()
 
     def _on_pan_release(self, event):
         self.configure(cursor='crosshair' if self._mode != 'select' else 'arrow')
@@ -942,6 +1062,7 @@ class NetworkCanvas(tk.Canvas):
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _place_node(self, ntype, x, y):
+        self._push_undo()
         if self._snap_on:
             x, y = self._snap(x), self._snap(y)
         count = sum(1 for n in self.nodes.values() if n.type == ntype) + 1
@@ -957,6 +1078,15 @@ class NetworkCanvas(tk.Canvas):
         """Snap world coordinate to nearest grid point."""
         return round(v / self.GRID) * self.GRID
 
+    @staticmethod
+    def _pt_seg_dist(px, py, ax, ay, bx, by):
+        """Distance from point (px,py) to segment (ax,ay)-(bx,by)."""
+        dx, dy = bx - ax, by - ay
+        if dx == 0 and dy == 0:
+            return math.hypot(px - ax, py - ay)
+        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy)))
+        return math.hypot(px - (ax + t * dx), py - (ay + t * dy))
+
     def _create_edge(self, src_id, dst_id, src_dir=None, dst_dir=None):
         if any(e.src == src_id and e.dst == dst_id for e in self.edges.values()):
             self._conn_reach = False
@@ -964,6 +1094,7 @@ class NetworkCanvas(tk.Canvas):
         if src_id == dst_id:
             self._conn_reach = False
             return
+        self._push_undo()
         rp = {'K': 1.0, 'X': 0.20, 'NSTPS': 0} if self._conn_reach else None
         cnt = sum(1 for e in self.edges.values() if e.reach_params) + 1
         lbl = f'RC{cnt:02d}' if rp else None
@@ -1187,33 +1318,92 @@ class NetworkCanvas(tk.Canvas):
                 depth[n.id] = 0
         max_depth = max(depth.values()) if depth else 0
 
-        STEP_X = 160; STEP_Y = 75; MARGIN_X = 100; MARGIN_Y = 80
-        y_cursor = [float(MARGIN_Y)]
+        G      = self.GRID   # 40
+        STEP_X = 5 * G       # 200  본류 수평 간격
+        STEP_Y = 3 * G       # 120  지류 수직 간격
+        MX     = 3 * G       # 120  좌측 여백
+        MAIN_Y = 8 * G       # 320  본류 y 좌표
+
+        # reach 엣지 연결 여부 조회 (본류 판별용)
+        def has_reach(pred_id, junc_id):
+            return any(e.src == pred_id and e.dst == junc_id and e.reach_params
+                       for e in self.edges.values())
+
+        # 본류 탐색: depth 최대 + reach 연결 우선
+        main_chain = [outlet_id]
+        cur = outlet_id
+        while True:
+            cands = preds[cur]
+            if not cands: break
+            nxt = max(cands, key=lambda nid: (
+                depth.get(nid, 0),
+                1 if has_reach(nid, cur) else 0
+            ))
+            main_chain.append(nxt)
+            cur = nxt
+        main_chain.reverse()    # 상류 → 하류
+        main_set = set(main_chain)
+
         positions = {}
-        visited   = set()
+        for nid in main_chain:
+            col = max_depth - depth[nid]
+            positions[nid] = (MX + col * STEP_X, MAIN_Y)
 
-        def assign(nid):
-            if nid in visited: return
-            visited.add(nid)
-            children = preds[nid]
-            x = MARGIN_X + (max_depth - depth[nid]) * STEP_X
-            if not children:
-                y = y_cursor[0]
-                y_cursor[0] += STEP_Y
+        # 지류 서브트리: 합류점 기준 상하 교번 배치
+        above = {}
+        below = {}
+
+        def place_subtree(root_id, junc_id, side):
+            if root_id in positions: return
+            junc_x = positions[junc_id][0]
+            if side < 0:
+                row = above.get(junc_id, 1); above[junc_id] = row + 1
+                base_y = MAIN_Y - row * STEP_Y
             else:
-                for c in children:
-                    assign(c)
-                cy = [positions[c][1] for c in children if c in positions]
-                y = (min(cy) + max(cy)) / 2.0 if cy else y_cursor[0]
-            positions[nid] = (x, y)
+                row = below.get(junc_id, 1); below[junc_id] = row + 1
+                base_y = MAIN_Y + row * STEP_Y
+            sub_depth = {root_id: 0}
+            q = [root_id]
+            while q:
+                nid2 = q.pop(0)
+                for c in preds[nid2]:
+                    if c not in positions and c not in sub_depth:
+                        sub_depth[c] = sub_depth[nid2] + 1
+                        q.append(c)
+            by_level = {}
+            for nid2, lv in sub_depth.items():
+                by_level.setdefault(lv, []).append(nid2)
+            for lv, nids in by_level.items():
+                x = junc_x - (lv + 1) * STEP_X
+                for k, nid2 in enumerate(nids):
+                    y = base_y + k * STEP_Y * side
+                    positions[nid2] = (x, y)
 
-        assign(outlet_id)
+        side = -1
+        for junc_id in main_chain:
+            tribs = [p for p in preds[junc_id] if p not in main_set]
+            for trib_id in tribs:
+                place_subtree(trib_id, junc_id, side)
+                side = -side
+
+        # 위치 적용
         for nid, (x, y) in positions.items():
             if nid in self.nodes:
-                self.nodes[nid].x = x
-                self.nodes[nid].y = y
-        max_x = max((x for x, y in positions.values()), default=1000) + 250
-        max_y = max((y for x, y in positions.values()), default=800)  + 200
+                self.nodes[nid].x = float(x)
+                self.nodes[nid].y = float(y)
+        for n in self.nodes.values():
+            if n.id not in positions:
+                n.x = float(MX); n.y = float(MAIN_Y + 2 * STEP_Y)
+
+        # y < G 이면 전체 아래로 이동
+        min_y = min(n.y for n in self.nodes.values())
+        if min_y < G:
+            shift = round((G - min_y) / G) * G
+            for n in self.nodes.values():
+                n.y += shift
+
+        max_x = max(n.x for n in self.nodes.values()) + 3 * STEP_X
+        max_y = max(n.y for n in self.nodes.values()) + 3 * STEP_Y
         self._world_bbox = (0, 0, int(max(max_x, 2000)), int(max(max_y, 900)))
         W = self._world_bbox[2] * self._zoom
         H = self._world_bbox[3] * self._zoom
@@ -1234,7 +1424,8 @@ class NetworkCanvas(tk.Canvas):
         by_level = {}
         for nid, lv in levels.items():
             by_level.setdefault(lv, []).append(nid)
-        STEP_X = 170; STEP_Y = 85; MARGIN_X = 120; MARGIN_Y = 80
+        G = self.GRID
+        STEP_X = 5 * G; STEP_Y = 3 * G; MARGIN_X = 3 * G; MARGIN_Y = 8 * G
         for lv, nids in sorted(by_level.items()):
             x = MARGIN_X + lv * STEP_X
             total_h = (len(nids) - 1) * STEP_Y
@@ -1348,17 +1539,16 @@ class PalettePanel(ctk.CTkFrame):
         ctk.CTkLabel(self, text='수문 요소', font=FONT_HEADER,
                      text_color='#5dade2').pack(pady=(14, 6))
 
-        for ntype, style in NODE_STYLES.items():
-            self._item(ntype, style)
-
-        # Reach edge special button
-        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(10,4))
+        self._item('SUBBASIN', NODE_STYLES['SUBBASIN'])
+        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(6, 2))
         self._item_reach_edge()
+        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(2, 6))
+        for ntype in ('RESERVOIR', 'JUNCTION', 'OUTLET'):
+            self._item(ntype, NODE_STYLES[ntype])
 
-        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(4,10))
         ctk.CTkLabel(self, text='클릭 후 캔버스에\n배치하세요',
                      font=('맑은 고딕', 9), text_color='gray',
-                     justify='center').pack()
+                     justify='center').pack(pady=(4, 0))
 
     def _item(self, ntype, style):
         frame = ctk.CTkFrame(self, corner_radius=8, fg_color='#1a1a2e',
@@ -1626,6 +1816,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self.title('수문망 편집기 — 하도추적')
         self.geometry('1380x720')
         self.minsize(900, 500)
+        self.after(50, lambda: self.state('zoomed'))
         self._on_apply = on_apply
         self._set_dark()
 
@@ -1671,13 +1862,15 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                      text='포트 클릭→연결  |  드래그=이동  |  Delete=삭제  |  Esc=취소  |  더블클릭=편집  |  드래그 빈공간=다중선택',
                      font=('맑은 고딕', 9), text_color='gray').pack(side='left', padx=6)
 
-        for txt, cmd, col in [
-            ('예제 로드',   self._load_example,   '#5d6d7e'),
-            ('초기화',      self._clear,           '#7f3b3b'),
-            ('적용 & 닫기', self._apply_and_close, '#27ae60'),
+        for txt, cmd, col, w in [
+            ('예제 로드',         self._load_example,   '#5d6d7e', 90),
+            ('초기화',            self._clear,           '#7f3b3b', 70),
+            ('PNG로 저장',        self._save_png,        '#1a5276', 90),
+            ('다른이름으로 저장', self._save_network,    '#1a5276', 120),
+            ('적용 & 닫기',       self._apply_and_close, '#27ae60', 100),
         ]:
             ctk.CTkButton(toolbar, text=txt, command=cmd,
-                          font=FONT_SMALL, height=30, width=100,
+                          font=FONT_SMALL, height=30, width=w,
                           fg_color=col).pack(side='right', padx=4, pady=6)
 
         self._snap_btn = ctk.CTkButton(
@@ -1746,6 +1939,41 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         if messagebox.askyesno('초기화', '네트워크를 모두 초기화하시겠습니까?', parent=self):
             self._canvas.clear()
             self._props.show_node(None)
+
+    def _save_network(self):
+        ops, err = self._canvas.build_operations()
+        if err:
+            messagebox.showerror('오류', err, parent=self)
+            return
+        if not ops:
+            messagebox.showwarning('알림', '저장할 네트워크가 없습니다.', parent=self)
+            return
+        path = filedialog.asksaveasfilename(
+            parent=self, title='네트워크 저장',
+            defaultextension='.json',
+            filetypes=[('JSON 파일', '*.json'), ('모든 파일', '*.*')])
+        if not path: return
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(ops, f, ensure_ascii=False, indent=2)
+        messagebox.showinfo('저장 완료', f'저장되었습니다:\n{path}', parent=self)
+
+    def _save_png(self):
+        path = filedialog.asksaveasfilename(
+            parent=self, title='PNG로 저장',
+            defaultextension='.png',
+            filetypes=[('PNG 파일', '*.png'), ('모든 파일', '*.*')])
+        if not path: return
+        try:
+            from PIL import ImageGrab
+            self.update_idletasks()
+            c = self._canvas
+            x = c.winfo_rootx(); y = c.winfo_rooty()
+            w = c.winfo_width(); h = c.winfo_height()
+            img = ImageGrab.grab(bbox=(x, y, x + w, y + h))
+            img.save(path)
+            messagebox.showinfo('저장 완료', f'PNG 저장:\n{path}', parent=self)
+        except ImportError:
+            messagebox.showerror('오류', 'Pillow(PIL) 라이브러리가 필요합니다.\npip install Pillow', parent=self)
 
     def _apply_and_close(self):
         ops, err = self._canvas.build_operations()
