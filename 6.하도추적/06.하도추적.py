@@ -991,6 +991,7 @@ class NetworkCanvas(tk.Canvas):
             self.redraw()
         elif self._sel_nodes:
             self._push_undo()
+            cnt = len(self._sel_nodes)
             for nid in list(self._sel_nodes):
                 for eid in [e for e, ed in self.edges.items() if ed.src == nid or ed.dst == nid]:
                     del self.edges[eid]
@@ -998,6 +999,7 @@ class NetworkCanvas(tk.Canvas):
                     del self.nodes[nid]
             self._sel_nodes.clear()
             if self._on_select: self._on_select(None)
+            if self._on_log: self._on_log(f'다중 삭제: {cnt}개 요소')
             self.redraw()
         elif self._sel_node:
             del_name = self._sel_node.name
@@ -1825,7 +1827,7 @@ class PalettePanel(ctk.CTkFrame):
         ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=6)
         ctk.CTkLabel(self, text='활동 로그', font=('맑은 고딕', 9),
                      text_color='#5dade2').pack(anchor='w', padx=10)
-        log_outer = ctk.CTkFrame(self, fg_color='#0d0d1a', corner_radius=6)
+        log_outer = tk.Frame(self, bg='#0d0d1a')
         log_outer.pack(fill='both', expand=True, padx=6, pady=(2, 6))
         ysb = tk.Scrollbar(log_outer, orient='vertical')
         ysb.pack(side='right', fill='y')
@@ -1911,7 +1913,7 @@ class PalettePanel(ctk.CTkFrame):
 # =============================================================================
 
 class PropertiesPanel(tk.Frame):
-    def __init__(self, master, redraw_cb=None, canvas_ref=None, **kwargs):
+    def __init__(self, master, redraw_cb=None, canvas_ref=None, on_log=None, **kwargs):
         kwargs.pop('corner_radius', None)   # tk.Frame 미지원 인자 제거
         super().__init__(master, bg='#1e1e2e', **kwargs)
         self._node       = None
@@ -1920,6 +1922,7 @@ class PropertiesPanel(tk.Frame):
         self._svars      = {}
         self._redraw     = redraw_cb
         self._canvas_ref = canvas_ref
+        self._on_log     = on_log
 
         # ── 헤더 (파일명 + 구분선 + 제목) ──
         hdr = tk.Frame(self, bg='#1a1a2e')
@@ -2156,6 +2159,9 @@ class PropertiesPanel(tk.Frame):
                 if pc_list:
                     self._node.params['huff_pc'] = pc_list
             if self._redraw: self._redraw()
+            if self._on_log:
+                lbl = NODE_STYLES.get(self._node.type, {}).get('label', self._node.type)
+                self._on_log(f'{lbl} 속성 변경: {self._node.name}')
         except ValueError as e:
             messagebox.showerror('입력 오류', str(e))
 
@@ -2240,6 +2246,8 @@ class PropertiesPanel(tk.Frame):
             for key, var in self._svars.items():
                 edge.reach_params[key] = round(float(var.get()), 4)
             if self._redraw: self._redraw()
+            if self._on_log:
+                self._on_log(f'하도추적 속성 변경: {edge.label or str(edge.id)[:8]}')
         except ValueError as e:
             messagebox.showerror('입력 오류', str(e))
 
@@ -2327,11 +2335,11 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         toolbar.grid(row=2, column=0, columnspan=2, sticky='ew')
 
         self._mode_lbl = ctk.CTkLabel(toolbar, text='모드: 선택',
-                                      font=FONT_SMALL, text_color='#5dade2', width=160)
+                                      font=FONT_SMALL, text_color='#5dade2', width=100)
         self._mode_lbl.pack(side='left', padx=12)
 
         ctk.CTkLabel(toolbar,
-                     text='포트 클릭→연결  |  드래그=이동  |  Delete=삭제  |  Esc=취소  |  더블클릭=편집  |  드래그 빈공간=다중선택',
+                     text='포트→연결  |  드래그=이동  |  Del=삭제  |  Esc=취소',
                      font=('맑은 고딕', 9), text_color='gray').pack(side='left', padx=6)
 
         for txt, cmd, col, w in [
@@ -2354,6 +2362,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._props = PropertiesPanel(self,
                                       redraw_cb=self._make_redraw_cb(),
                                       canvas_ref=self._canvas,
+                                      on_log=self._log,
                                       corner_radius=0)
         self._props.grid(row=0, column=2, sticky='nsew', rowspan=2)
 
@@ -2588,6 +2597,8 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                 self._props.set_dat_title(f'{dat_name} 미리보기')
                 with open(dat_path, 'r', encoding='utf-8', errors='replace') as f:
                     self._props.update_dat_preview(f.read())
+            fname = os.path.basename(json_path or dat_path or '')
+            self._log(f'불러오기: {fname}')
             self._props.show_node(None)
         except Exception as e:
             messagebox.showerror('불러오기 오류', str(e), parent=self)
@@ -2729,6 +2740,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                 f.write(dat_content)
             self._props.update_dat_preview(dat_content)
         self._props.set_filename(self._current_path)
+        self._log(f'저장/적용: {os.path.basename(self._current_path)}')
         self._mode_lbl.configure(text='적용 완료 ✓')
         self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
 
@@ -2741,6 +2753,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._canvas.redraw()
         # 배열 후 전체 보기 (zoom-extents)
         self._canvas._zoom_extents()
+        self._log('배열최적화 완료')
         self._mode_lbl.configure(text='배열최적화 완료 ✓')
         self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
 
