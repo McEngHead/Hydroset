@@ -1,0 +1,10 @@
+{
+  "step6": {
+    "DT_MIN": 60.0,
+    "TR_MIN": 1440.0,
+    "NQ": 300.0,
+    "BASEFLOW": 0.0,
+    "huff": "3분위",
+    "operations": []
+  }
+}

@@ -1,0 +1,474 @@
+{
+  "format": "hydroset_canvas_v1",
+  "nodes": [
+    {
+      "id": 68,
+      "type": "SUBBASIN",
+      "name": "XMG13",
+      "x": 1320.0,
+      "y": 640.0,
+      "params": {
+        "A": 13.9,
+        "PB": 255.2,
+        "CN": 91.6,
+        "Tc": 0.59,
+        "R": 1.01
+      }
+    },
+    {
+      "id": 69,
+      "type": "SUBBASIN",
+      "name": "XMG14",
+      "x": 1120.0,
+      "y": 640.0,
+      "params": {
+        "A": 0.1,
+        "PB": 309.5,
+        "CN": 10.0,
+        "Tc": 0.1,
+        "R": 0.18
+      }
+    },
+    {
+      "id": 70,
+      "type": "SUBBASIN",
+      "name": "SYC00",
+      "x": 1120.0,
+      "y": 80.0,
+      "params": {
+        "A": 152.7,
+        "PB": 287.7,
+        "CN": 87.8,
+        "Tc": 2.15,
+        "R": 3.55
+      }
+    },
+    {
+      "id": 71,
+      "type": "SUBBASIN",
+      "name": "XMG15",
+      "x": 920.0,
+      "y": 240.0,
+      "params": {
+        "A": 68.5,
+        "PB": 302.4,
+        "CN": 85.9,
+        "Tc": 1.87,
+        "R": 3.06
+      }
+    },
+    {
+      "id": 72,
+      "type": "SUBBASIN",
+      "name": "XMG17",
+      "x": 720.0,
+      "y": 640.0,
+      "params": {
+        "A": 0.1,
+        "PB": 309.5,
+        "CN": 10.0,
+        "Tc": 0.1,
+        "R": 0.18
+      }
+    },
+    {
+      "id": 73,
+      "type": "SUBBASIN",
+      "name": "XGSC00",
+      "x": 720.0,
+      "y": 80.0,
+      "params": {
+        "A": 77.1,
+        "PB": 310.9,
+        "CN": 86.9,
+        "Tc": 1.76,
+        "R": 2.89
+      }
+    },
+    {
+      "id": 74,
+      "type": "SUBBASIN",
+      "name": "GSC04",
+      "x": 520.0,
+      "y": 240.0,
+      "params": {
+        "A": 68.6,
+        "PB": 307.7,
+        "CN": 80.8,
+        "Tc": 1.54,
+        "R": 2.54
+      }
+    },
+    {
+      "id": 75,
+      "type": "JUNCTION",
+      "name": "GSC00",
+      "x": 720.0,
+      "y": 240.0,
+      "params": {}
+    },
+    {
+      "id": 76,
+      "type": "SUBBASIN",
+      "name": "XMG18",
+      "x": 520.0,
+      "y": 640.0,
+      "params": {
+        "A": 33.5,
+        "PB": 305.2,
+        "CN": 91.7,
+        "Tc": 1.1,
+        "R": 1.27
+      }
+    },
+    {
+      "id": 77,
+      "type": "SUBBASIN",
+      "name": "XMG23",
+      "x": 320.0,
+      "y": 640.0,
+      "params": {
+        "A": 27.5,
+        "PB": 287.3,
+        "CN": 92.9,
+        "Tc": 0.9,
+        "R": 1.05
+      }
+    },
+    {
+      "id": 78,
+      "type": "SUBBASIN",
+      "name": "MG24",
+      "x": 320.0,
+      "y": 240.0,
+      "params": {
+        "A": 79.9,
+        "PB": 279.3,
+        "CN": 89.8,
+        "Tc": 1.29,
+        "R": 1.83
+      }
+    },
+    {
+      "id": 79,
+      "type": "JUNCTION",
+      "name": "MG23",
+      "x": 320.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 80,
+      "type": "JUNCTION",
+      "name": "MG18",
+      "x": 520.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 81,
+      "type": "JUNCTION",
+      "name": "MG17",
+      "x": 720.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 82,
+      "type": "JUNCTION",
+      "name": "MG15",
+      "x": 920.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 83,
+      "type": "JUNCTION",
+      "name": "MG14",
+      "x": 1120.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 84,
+      "type": "JUNCTION",
+      "name": "MG13",
+      "x": 1320.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 85,
+      "type": "SUBBASIN",
+      "name": "JJC10",
+      "x": 1560.0,
+      "y": 640.0,
+      "params": {
+        "A": 31.7,
+        "PB": 310.4,
+        "CN": 85.0,
+        "Tc": 0.99,
+        "R": 1.64
+      }
+    },
+    {
+      "id": 86,
+      "type": "SUBBASIN",
+      "name": "XSW00",
+      "x": 1560.0,
+      "y": 80.0,
+      "params": {
+        "A": 2.9,
+        "PB": 314.2,
+        "CN": 87.7,
+        "Tc": 0.19,
+        "R": 0.27
+      }
+    },
+    {
+      "id": 87,
+      "type": "SUBBASIN",
+      "name": "SW01",
+      "x": 1440.0,
+      "y": 240.0,
+      "params": {
+        "A": 26.0,
+        "PB": 289.8,
+        "CN": 88.9,
+        "Tc": 0.71,
+        "R": 1.02
+      }
+    },
+    {
+      "id": 88,
+      "type": "JUNCTION",
+      "name": "SW00",
+      "x": 1560.0,
+      "y": 440.0,
+      "params": {}
+    },
+    {
+      "id": 90,
+      "type": "OUTLET",
+      "name": "OUT",
+      "x": 1760.0,
+      "y": 440.0,
+      "params": {}
+    }
+  ],
+  "edges": [
+    {
+      "id": 71,
+      "src": 74,
+      "dst": 75,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": {
+        "K": 0.65,
+        "X": 0.2,
+        "NSTPS": 0
+      },
+      "label": "GSC00R"
+    },
+    {
+      "id": 72,
+      "src": 73,
+      "dst": 75,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 73,
+      "src": 78,
+      "dst": 79,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": {
+        "K": 0.63,
+        "X": 0.2,
+        "NSTPS": 0
+      },
+      "label": "MG23R"
+    },
+    {
+      "id": 74,
+      "src": 77,
+      "dst": 79,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 75,
+      "src": 79,
+      "dst": 80,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": {
+        "K": 0.34,
+        "X": 0.2,
+        "NSTPS": 0
+      },
+      "label": "MG18R"
+    },
+    {
+      "id": 76,
+      "src": 76,
+      "dst": 80,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 77,
+      "src": 80,
+      "dst": 81,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 78,
+      "src": 75,
+      "dst": 81,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 79,
+      "src": 72,
+      "dst": 81,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 80,
+      "src": 81,
+      "dst": 82,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": {
+        "K": 1.53,
+        "X": 0.2,
+        "NSTPS": 0
+      },
+      "label": "MG15R"
+    },
+    {
+      "id": 81,
+      "src": 71,
+      "dst": 82,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 82,
+      "src": 82,
+      "dst": 83,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 83,
+      "src": 70,
+      "dst": 83,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 84,
+      "src": 69,
+      "dst": 83,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 85,
+      "src": 83,
+      "dst": 84,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": {
+        "K": 0.48,
+        "X": 0.2,
+        "NSTPS": 0
+      },
+      "label": "MG13R"
+    },
+    {
+      "id": 86,
+      "src": 68,
+      "dst": 84,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 87,
+      "src": 87,
+      "dst": 88,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": {
+        "K": 0.13,
+        "X": 0.2,
+        "NSTPS": 0
+      },
+      "label": "SW00R"
+    },
+    {
+      "id": 88,
+      "src": 86,
+      "dst": 88,
+      "src_dir": null,
+      "dst_dir": null,
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 93,
+      "src": 84,
+      "dst": 88,
+      "src_dir": "E",
+      "dst_dir": "W",
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 94,
+      "src": 88,
+      "dst": 90,
+      "src_dir": "E",
+      "dst_dir": "W",
+      "reach_params": null,
+      "label": null
+    },
+    {
+      "id": 95,
+      "src": 85,
+      "dst": 88,
+      "src_dir": "N",
+      "dst_dir": "S",
+      "reach_params": null,
+      "label": null
+    }
+  ]
+}

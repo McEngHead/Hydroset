@@ -1,8 +1,8 @@
 """
-06.하도추적.py — 머스킹엄 하도홍수추적 (Muskingum Flood Routing)
+06.하도추적.py — Muskingum 하도홍수추적 (Muskingum Flood Routing)
 Hydro Analysis System  Module 6
 
-머스킹엄 방법 (KWRA 수문학 CH08 기준):
+Muskingum 방법 (KWRA 수문학 CH08 기준):
   S = K[xI + (1-x)O]
   O2 = C1*I2 + C2*I1 + C3*O1
   C1 = (-Kx + 0.5Δt) / (K - Kx + 0.5Δt)
@@ -60,7 +60,7 @@ NODE_STYLES = {
 _REACH_STYLE = {'label': '하도추적', 'fill': '#1a2d4a', 'outline': '#2980b9', 'shape': 'parallelogram'}
 
 # =============================================================================
-# 머스킹엄 추적 엔진
+# Muskingum 추적 엔진
 # =============================================================================
 
 class MuskingumEngine:
@@ -247,7 +247,8 @@ class HydroNetworkProcessor:
                 CN = float(op.get('CN', 80.0))
                 Tc = float(op.get('Tc', 1.0))
                 R  = float(op.get('R',  1.5))
-                flow = self.clark.compute_runoff(A, Tc, R, PB, tr_min, dt_min, CN, huff_pc, NQ)
+                node_huff_pc = op.get('huff_pc') or huff_pc
+                flow = self.clark.compute_runoff(A, Tc, R, PB, tr_min, dt_min, CN, node_huff_pc, NQ)
                 stack.append(flow.copy())
                 cum_area += A
                 pidx = int(np.argmax(flow))
@@ -271,7 +272,7 @@ class HydroNetworkProcessor:
                     'K': K, 'X': X, 'NSTPS': ns, 'stable': stable,
                     'C1': C1, 'C2': C2, 'C3': C3,
                     'peak_q': float(outflow[pidx]), 'peak_hr': pidx * dt_hr, 'cum_area': cum_area}
-                self.summary.append({'op': f'머스킹엄(K={K:.2f},X={X:.2f})', 'station': name,
+                self.summary.append({'op': f'Muskingum(K={K:.2f},X={X:.2f})', 'station': name,
                     'peak_q': float(outflow[pidx]), 'peak_hr': pidx * dt_hr, 'cum_area': cum_area})
 
             elif t == 'COMBINE':
@@ -350,8 +351,8 @@ class NetworkNode:
         return {}
 
     # Half-sizes for hit-testing
-    _HW = {'SUBBASIN': 58, 'RESERVOIR': 52, 'REACH': 62, 'JUNCTION': 28, 'OUTLET': 30}
-    _HH = {'SUBBASIN': 26, 'RESERVOIR': 26, 'REACH': 20, 'JUNCTION': 28, 'OUTLET': 26}
+    _HW = {'SUBBASIN': 58, 'RESERVOIR': 52, 'REACH': 62, 'JUNCTION': 34, 'OUTLET': 30}
+    _HH = {'SUBBASIN': 26, 'RESERVOIR': 26, 'REACH': 20, 'JUNCTION': 34, 'OUTLET': 26}
 
     def hit_test(self, px, py):
         hw = self._HW.get(self.type, 40)
@@ -396,9 +397,10 @@ HIT_R  = 12 # port hit radius
 
 class NetworkCanvas(tk.Canvas):
 
-    GRID = 40
+    GRID        = 40
+    _SCROLL_PAD = 1200   # 콘텐츠 경계 바깥 여유 공간 (canvas px)
 
-    def __init__(self, master, on_select=None, on_edge_select=None, **kwargs):
+    def __init__(self, master, on_select=None, on_edge_select=None, on_log=None, **kwargs):
         super().__init__(master, bg='#12121e', highlightthickness=0, **kwargs)
         self.nodes   = {}   # id -> NetworkNode
         self.edges   = {}   # id -> NetworkEdge
@@ -412,6 +414,7 @@ class NetworkCanvas(tk.Canvas):
         self._mouse_xy      = (0, 0)
         self._on_select      = on_select       # callback(node or None)
         self._on_edge_select = on_edge_select  # callback(edge or None)
+        self._on_log         = on_log          # callback(str)
         self._zoom       = 1.0
         self._world_bbox = (0, 0, 3000, 1200)
         self._pan_last   = None
@@ -423,6 +426,7 @@ class NetworkCanvas(tk.Canvas):
         self._redo_stack   = []
         self._reach_drag   = None    # (edge, src_ox, src_oy, dst_ox, dst_oy) — reach label drag
         self._edge_reconnect = None  # {'edge', 'end':'src'|'dst', 'fixed_port':(x,y)}
+        self._drag_redraw_id = None  # after() ID for drag-throttle
 
         self.bind('<Button-1>',        self._click)
         self.bind('<B1-Motion>',       self._drag)
@@ -434,15 +438,18 @@ class NetworkCanvas(tk.Canvas):
         self.bind('<Double-Button-1>', self._dbl_click)
         self.bind('<Configure>',       lambda e: self.redraw())
         self.bind('<MouseWheel>',      self._on_zoom)
+        self.bind('<Button-3>',        self._right_click)
         self.bind('<Button-2>',        self._on_pan_press)
         self.bind('<B2-Motion>',       self._on_pan_drag)
         self.bind('<ButtonRelease-2>', self._on_pan_release)
+        self.bind('<Double-Button-2>', self._zoom_extents)
         self.bind('<Left>',            self._on_arrow)
         self.bind('<Right>',           self._on_arrow)
         self.bind('<Up>',              self._on_arrow)
         self.bind('<Down>',            self._on_arrow)
         self.bind('<Control-z>',       self._undo)
         self.bind('<Control-y>',       self._redo)
+        self.bind('<Control-Alt-z>',   self._redo)
 
     # ── coordinate helpers ───────────────────────────────────────────────────
 
@@ -468,6 +475,16 @@ class NetworkCanvas(tk.Canvas):
             self._draw_sel_box()
         if self._edge_reconnect:
             self._draw_reconnect_preview()
+
+    def _redraw_throttled(self):
+        """드래그 중 redraw 스로틀: 16ms(≈60fps) 상한으로 실행 횟수 제한."""
+        if self._drag_redraw_id is not None:
+            return
+        self._drag_redraw_id = self.after(16, self._redraw_throttled_fire)
+
+    def _redraw_throttled_fire(self):
+        self._drag_redraw_id = None
+        self.redraw()
 
     def _draw_grid(self):
         w = max(self.winfo_width(),  self.winfo_reqwidth(),  100)
@@ -532,12 +549,12 @@ class NetworkCanvas(tk.Canvas):
             self._draw_node(node)
 
     def _draw_sel_box(self):
-        """Draw rubber-band selection rectangle."""
+        """Draw rubber-band selection rectangle (tagged for fast coord-only update)."""
         z = self._zoom
         x0w, y0w = self._rubber_start
         x1w, y1w = self._mouse_xy
         self.create_rectangle(x0w*z, y0w*z, x1w*z, y1w*z,
-                              outline='#5dade2', width=1, dash=(4,3))
+                              outline='#5dade2', width=1, dash=(4,3), tags='_sel_box')
 
     def _draw_reconnect_preview(self):
         """Draw dashed line from fixed end to mouse during edge reconnect drag."""
@@ -591,17 +608,19 @@ class NetworkCanvas(tk.Canvas):
         self.create_text(x, y + 8*z, text=f'[{lbl}]', fill='#888888',
                          font=('맑은 고딕', fs_type), tags=tag)
 
-        # Four-direction port circles
-        has_out      = node.type != 'OUTLET'
-        port_fill    = '#e67e22' if has_out else '#27ae60'
-        port_outline = '#f39c12' if has_out else '#2ecc71'
-        pr = max(2, int(PORT_R * z))
-        for d in ('E', 'W', 'N', 'S'):
-            wx, wy = node.port(d)
-            px, py = wx*z, wy*z
-            self.create_oval(px-pr, py-pr, px+pr, py+pr,
-                             fill=port_fill, outline=port_outline, width=1,
-                             tags=f'port_{d}_{node.id}')
+        # Four-direction port circles — select 모드에서 비선택 노드는 생략 (성능)
+        show_ports = sel or self._mode != 'select'
+        if show_ports:
+            has_out      = node.type != 'OUTLET'
+            port_fill    = '#e67e22' if has_out else '#27ae60'
+            port_outline = '#f39c12' if has_out else '#2ecc71'
+            pr = max(2, int(PORT_R * z))
+            for d in ('E', 'W', 'N', 'S'):
+                wx, wy = node.port(d)
+                px, py = wx*z, wy*z
+                self.create_oval(px-pr, py-pr, px+pr, py+pr,
+                                 fill=port_fill, outline=port_outline, width=1,
+                                 tags=f'port_{d}_{node.id}')
 
     def _round_rect(self, x1, y1, x2, y2, r, **kw):
         pts = [x1+r,y1, x2-r,y1, x2,y1, x2,y1+r,
@@ -626,14 +645,13 @@ class NetworkCanvas(tk.Canvas):
 
     @staticmethod
     def _port_dirs(src, dst, src_hint=None, dst_hint=None):
-        """Auto-select best port directions based on relative node positions."""
+        """위치 기반 자동 포트 방향 선택 (힌트 무시, 항상 최적 방향)."""
         dx = dst.x - src.x
         dy = dst.y - src.y
         if abs(dx) >= abs(dy):
-            auto_s, auto_d = ('E', 'W') if dx >= 0 else ('W', 'E')
+            return ('E', 'W') if dx >= 0 else ('W', 'E')
         else:
-            auto_s, auto_d = ('S', 'N') if dy >= 0 else ('N', 'S')
-        return (src_hint or auto_s, dst_hint or auto_d)
+            return ('S', 'N') if dy >= 0 else ('N', 'S')
 
     @staticmethod
     def _bezier_cps(x1, y1, d1, x2, y2, d2):
@@ -701,10 +719,11 @@ class NetworkCanvas(tk.Canvas):
         z = self._zoom
         self._mouse_xy = (self._cx(event.x) / z, self._cy(event.y) / z)
         if self._mode == 'connect':
-            self.redraw()
+            self._redraw_throttled()
 
     def _click(self, event):
         self.focus_set()
+        self.after(0, self.focus_set)   # 콜백 내 위젯 생성/삭제 후 포커스 복원
         z = self._zoom
         x, y = self._cx(event.x) / z, self._cy(event.y) / z
 
@@ -741,7 +760,31 @@ class NetworkCanvas(tk.Canvas):
             self.set_mode('select'); self.redraw(); return
 
         # --- SELECT MODE ---
-        # 1. Check output ports first (start connection)
+        # 1. Check edges first (port 영역 제외) — 포트보다 먼저 검사해야 선택 가능
+        OPP = {'E':'W','W':'E','N':'S','S':'N'}
+        for edge in self.edges.values():
+            src = self.nodes.get(edge.src)
+            dst = self.nodes.get(edge.dst)
+            if src and dst:
+                sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
+                p1 = src.port(sd); p2 = dst.port(dd)
+                # 포트 근처 클릭은 포트 감지에 양보
+                if abs(x-p1[0]) <= HIT_R and abs(y-p1[1]) <= HIT_R: continue
+                if abs(x-p2[0]) <= HIT_R and abs(y-p2[1]) <= HIT_R: continue
+                pts = self._ortho_wpts(p1[0], p1[1], sd, p2[0], p2[1], OPP[dd])
+                hit = any(self._pt_seg_dist(x, y, pts[i][0], pts[i][1],
+                                            pts[i+1][0], pts[i+1][1]) <= 8
+                          for i in range(len(pts) - 1))
+                if hit:
+                    self._sel_edge = edge
+                    self._sel_node = None
+                    self._sel_nodes.clear()
+                    if self._on_select: self._on_select(None)
+                    if self._on_edge_select: self._on_edge_select(edge)
+                    self.redraw()
+                    return
+
+        # 2. Check output ports (start connection)
         for node in reversed(list(self.nodes.values())):
             if node.type == 'OUTLET': continue  # no outputs
             for d in ('E', 'W', 'N', 'S'):
@@ -753,7 +796,7 @@ class NetworkCanvas(tk.Canvas):
                     self.redraw()
                     return
 
-        # 2. Check selected edge endpoint handles (reconnect drag)
+        # 3. Check selected edge endpoint handles (reconnect drag)
         if self._sel_edge:
             edge = self._sel_edge
             src  = self.nodes.get(edge.src)
@@ -773,7 +816,7 @@ class NetworkCanvas(tk.Canvas):
                         self.redraw()
                         return
 
-        # 3. Check reach edge labels (parallelogram) — drag moves src+dst together
+        # 4. Check reach edge labels (parallelogram) — drag moves src+dst together
         for edge in self.edges.values():
             if not edge.reach_params: continue
             src = self.nodes.get(edge.src)
@@ -795,7 +838,7 @@ class NetworkCanvas(tk.Canvas):
                     self.redraw()
                     return
 
-        # 3. Check node bodies
+        # 5. Check node bodies
         for node in reversed(list(self.nodes.values())):
             if node.hit_test(x, y):
                 if self._sel_nodes and node.id in self._sel_nodes:
@@ -815,26 +858,6 @@ class NetworkCanvas(tk.Canvas):
                 self.redraw()
                 return
 
-        # 3. Check edges (click near any segment)
-        OPP = {'E':'W','W':'E','N':'S','S':'N'}
-        for edge in self.edges.values():
-            src = self.nodes.get(edge.src)
-            dst = self.nodes.get(edge.dst)
-            if src and dst:
-                sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
-                p1 = src.port(sd); p2 = dst.port(dd)
-                pts = self._ortho_wpts(p1[0], p1[1], sd, p2[0], p2[1], OPP[dd])
-                hit = any(self._pt_seg_dist(x, y, pts[i][0], pts[i][1],
-                                            pts[i+1][0], pts[i+1][1]) <= 8
-                          for i in range(len(pts) - 1))
-                if hit:
-                    self._sel_edge = edge
-                    self._sel_node = None
-                    if self._on_select: self._on_select(None)
-                    if self._on_edge_select: self._on_edge_select(edge)
-                    self.redraw()
-                    return
-
         # 4. Nothing hit — start rubber-band selection
         self._sel_node = None
         self._sel_edge = None
@@ -848,11 +871,16 @@ class NetworkCanvas(tk.Canvas):
         x, y = self._cx(event.x) / z, self._cy(event.y) / z
         if self._rubber_start:
             self._mouse_xy = (x, y)
-            self.redraw()
+            # 빠른 경로: 선택 사각형 좌표만 갱신 (전체 redraw 없음)
+            x0w, y0w = self._rubber_start
+            if self.find_withtag('_sel_box'):
+                self.coords('_sel_box', x0w*z, y0w*z, x*z, y*z)
+            else:
+                self.redraw()
             return
         if self._edge_reconnect and self._drag_start:
             self._mouse_xy = (x, y)
-            self.redraw()
+            self._redraw_throttled()
             return
         if self._reach_drag and self._drag_start:
             dx = x - self._drag_start[0]
@@ -868,7 +896,7 @@ class NetworkCanvas(tk.Canvas):
                 nx, ny = dox + dx, doy + dy
                 if self._snap_on: nx, ny = self._snap(nx), self._snap(ny)
                 dst.x, dst.y = nx, ny
-            self.redraw()
+            self._redraw_throttled()
             return
         if self._drag_start:
             dx = x - self._drag_start[0]
@@ -889,7 +917,7 @@ class NetworkCanvas(tk.Canvas):
                     nx, ny = self._snap(nx), self._snap(ny)
                 self._sel_node.x = nx
                 self._sel_node.y = ny
-            self.redraw()
+            self._redraw_throttled()
 
     def _release(self, event):
         if self._edge_reconnect:
@@ -929,6 +957,7 @@ class NetworkCanvas(tk.Canvas):
             xmin, xmax = min(x0, x), max(x0, x)
             ymin, ymax = min(y0, y), max(y0, y)
             self._rubber_start = None
+            self.delete('_sel_box')   # 선택 사각형 즉시 제거
             if xmax - xmin > 4 or ymax - ymin > 4:
                 hit = {n.id for n in self.nodes.values()
                        if xmin <= n.x <= xmax and ymin <= n.y <= ymax}
@@ -941,7 +970,11 @@ class NetworkCanvas(tk.Canvas):
                     self._sel_nodes = hit
                     self._sel_node  = None
                     if self._on_select: self._on_select(None)
-            self.redraw()
+            self.after(0, self.redraw)
+        # 드래그 종료 시 대기 중인 스로틀 취소 후 즉시 최종 redraw
+        if self._drag_redraw_id is not None:
+            self.after_cancel(self._drag_redraw_id)
+            self._drag_redraw_id = None
         self._drag_start     = None
         self._multi_origin   = {}
         self._reach_drag     = None
@@ -950,9 +983,11 @@ class NetworkCanvas(tk.Canvas):
     def _delete(self, event):
         if self._sel_edge:
             self._push_undo()
+            edge_label = self._sel_edge.label or str(self._sel_edge.id)
             eid = self._sel_edge.id
             if eid in self.edges: del self.edges[eid]
             self._sel_edge = None
+            if self._on_log: self._on_log(f'연결선 삭제: {edge_label}')
             self.redraw()
         elif self._sel_nodes:
             self._push_undo()
@@ -965,14 +1000,62 @@ class NetworkCanvas(tk.Canvas):
             if self._on_select: self._on_select(None)
             self.redraw()
         elif self._sel_node:
+            del_name = self._sel_node.name
+            del_type = NODE_STYLES.get(self._sel_node.type, {}).get('label', self._sel_node.type)
             self._push_undo()
             nid = self._sel_node.id
             for eid in [eid for eid, e in self.edges.items() if e.src == nid or e.dst == nid]:
                 del self.edges[eid]
             del self.nodes[nid]
             self._sel_node = None
+            if self._on_log: self._on_log(f'{del_type} 삭제: {del_name}')
             if self._on_select: self._on_select(None)
             self.redraw()
+
+    def _right_click(self, event):
+        z = self._zoom
+        x, y = self._cx(event.x) / z, self._cy(event.y) / z
+        OPP = {'E':'W','W':'E','N':'S','S':'N'}
+        hit_edge = None
+        for edge in self.edges.values():
+            src = self.nodes.get(edge.src)
+            dst = self.nodes.get(edge.dst)
+            if src and dst:
+                sd, dd = self._port_dirs(src, dst, edge.src_dir, edge.dst_dir)
+                p1 = src.port(sd); p2 = dst.port(dd)
+                pts = self._ortho_wpts(p1[0], p1[1], sd, p2[0], p2[1], OPP[dd])
+                if any(self._pt_seg_dist(x, y, pts[i][0], pts[i][1],
+                                         pts[i+1][0], pts[i+1][1]) <= 8
+                       for i in range(len(pts) - 1)):
+                    hit_edge = edge
+                    break
+        if hit_edge is None:
+            return
+        # 선택 상태로 표시
+        self._sel_edge = hit_edge
+        self._sel_node = None
+        self._sel_nodes.clear()
+        self.redraw()
+        # 컨텍스트 메뉴
+        menu = tk.Menu(self, tearoff=0, bg='#1e1e2e', fg='white',
+                       activebackground='#c0392b', activeforeground='white',
+                       font=('맑은 고딕', 10))
+        lbl = hit_edge.label or hit_edge.id[:8]
+        menu.add_command(label=f'연결선 삭제: {lbl}',
+                         command=lambda e=hit_edge: self._delete_edge(e))
+        menu.tk_popup(event.x_root, event.y_root)
+
+    def _delete_edge(self, edge):
+        self._push_undo()
+        eid = edge.id
+        lbl = edge.label or eid[:8]
+        if eid in self.edges:
+            del self.edges[eid]
+        if self._sel_edge and self._sel_edge.id == eid:
+            self._sel_edge = None
+        if self._on_edge_select: self._on_edge_select(None)
+        if self._on_log: self._on_log(f'연결선 삭제: {lbl}')
+        self.redraw()
 
     def _escape(self, event):
         self._conn_src = None
@@ -990,7 +1073,7 @@ class NetworkCanvas(tk.Canvas):
         self._redo_stack.clear()
 
     def _undo(self, event=None):
-        if not self._undo_stack: return
+        if not self._undo_stack: return 'break'
         cur = (copy.deepcopy(self.nodes), copy.deepcopy(self.edges))
         self._redo_stack.append(cur)
         self.nodes, self.edges = self._undo_stack.pop()
@@ -999,6 +1082,7 @@ class NetworkCanvas(tk.Canvas):
         self._sel_nodes.clear()
         if self._on_select: self._on_select(None)
         self.redraw()
+        return 'break'
 
     def _redo(self, event=None):
         if not self._redo_stack: return
@@ -1013,6 +1097,12 @@ class NetworkCanvas(tk.Canvas):
 
     # ── zoom / pan ───────────────────────────────────────────────────────────
 
+    def _update_scrollregion(self):
+        PAD = self._SCROLL_PAD
+        W = self._world_bbox[2] * self._zoom
+        H = self._world_bbox[3] * self._zoom
+        self.configure(scrollregion=(-PAD, -PAD, int(W) + PAD, int(H) + PAD))
+
     def _on_zoom(self, event):
         factor   = 1.1 if event.delta > 0 else 1/1.1
         new_zoom = max(0.15, min(4.0, self._zoom * factor))
@@ -1022,13 +1112,17 @@ class NetworkCanvas(tk.Canvas):
         wx_m = cx_m / self._zoom
         wy_m = cy_m / self._zoom
         self._zoom = new_zoom
-        W = self._world_bbox[2] * self._zoom
-        H = self._world_bbox[3] * self._zoom
-        self.configure(scrollregion=(0, 0, int(W)+1, int(H)+1))
+        self._update_scrollregion()
+        PAD = self._SCROLL_PAD
+        W  = self._world_bbox[2] * self._zoom
+        H  = self._world_bbox[3] * self._zoom
+        tW = W + 2 * PAD
+        tH = H + 2 * PAD
         new_cx = wx_m * self._zoom
         new_cy = wy_m * self._zoom
-        if W > 0: self.xview_moveto(max(0.0, (new_cx - event.x) / W))
-        if H > 0: self.yview_moveto(max(0.0, (new_cy - event.y) / H))
+        # 클램프 없음 — 음수 캔버스 영역으로 자유롭게 이동
+        if tW > 0: self.xview_moveto((new_cx - event.x + PAD) / tW)
+        if tH > 0: self.yview_moveto((new_cy - event.y + PAD) / tH)
         self.redraw()
 
     def _on_pan_press(self, event):
@@ -1043,14 +1137,38 @@ class NetworkCanvas(tk.Canvas):
         self.configure(cursor='crosshair' if self._mode != 'select' else 'arrow')
         self._pan_last = None
 
+    def _zoom_extents(self, event=None):
+        """휠버튼 더블클릭: 모든 노드가 보이도록 줌·스크롤 조정 (CAD Zoom Extents)."""
+        if not self.nodes: return
+        xs = [n.x for n in self.nodes.values()]
+        ys = [n.y for n in self.nodes.values()]
+        PAD_W = 4 * self.GRID          # 노드 외곽 여유 (world units)
+        wx0 = min(xs) - PAD_W;  wx1 = max(xs) + PAD_W
+        wy0 = min(ys) - PAD_W;  wy1 = max(ys) + PAD_W
+        ww = wx1 - wx0;  wh = wy1 - wy0
+        if ww < 1 or wh < 1: return
+        cw = self.winfo_width();  ch = self.winfo_height()
+        if cw < 10 or ch < 10: return
+        self._zoom = max(0.15, min(4.0, min(cw / ww, ch / wh)))
+        self._update_scrollregion()
+        PAD = self._SCROLL_PAD
+        W = self._world_bbox[2] * self._zoom + 2 * PAD
+        H = self._world_bbox[3] * self._zoom + 2 * PAD
+        cx = (wx0 + ww / 2) * self._zoom
+        cy = (wy0 + wh / 2) * self._zoom
+        if W > 0: self.xview_moveto((cx - cw / 2 + PAD) / W)
+        if H > 0: self.yview_moveto((cy - ch / 2 + PAD) / H)
+        self.redraw()
+
     def _on_arrow(self, event):
         step = 30.0
-        W = self._world_bbox[2] * self._zoom
-        H = self._world_bbox[3] * self._zoom
-        if   event.keysym == 'Left':  self.xview_moveto(max(0.0, self.xview()[0] - step/W))
-        elif event.keysym == 'Right': self.xview_moveto(min(1.0, self.xview()[0] + step/W))
-        elif event.keysym == 'Up':    self.yview_moveto(max(0.0, self.yview()[0] - step/H))
-        elif event.keysym == 'Down':  self.yview_moveto(min(1.0, self.yview()[0] + step/H))
+        PAD = self._SCROLL_PAD
+        tW = self._world_bbox[2] * self._zoom + 2 * PAD
+        tH = self._world_bbox[3] * self._zoom + 2 * PAD
+        if   event.keysym == 'Left':  self.xview_moveto(self.xview()[0] - step / tW)
+        elif event.keysym == 'Right': self.xview_moveto(self.xview()[0] + step / tW)
+        elif event.keysym == 'Up':    self.yview_moveto(self.yview()[0] - step / tH)
+        elif event.keysym == 'Down':  self.yview_moveto(self.yview()[0] + step / tH)
 
     def _dbl_click(self, event):
         x, y = self._cx(event.x) / self._zoom, self._cy(event.y) / self._zoom
@@ -1073,6 +1191,8 @@ class NetworkCanvas(tk.Canvas):
         self._sel_node = node
         self._sel_edge = None
         self.redraw()
+        if self._on_log:
+            self._on_log(f'{NODE_STYLES.get(ntype, {}).get("label", ntype)} 생성: {name}')
 
     def _snap(self, v):
         """Snap world coordinate to nearest grid point."""
@@ -1101,6 +1221,13 @@ class NetworkCanvas(tk.Canvas):
         edge = NetworkEdge(src_id, dst_id, src_dir, dst_dir, reach_params=rp, label=lbl)
         self.edges[edge.id] = edge
         self._conn_reach = False
+        if self._on_log:
+            sn = self.nodes.get(src_id)
+            dn = self.nodes.get(dst_id)
+            sname = sn.name if sn else str(src_id)
+            dname = dn.name if dn else str(dst_id)
+            reach_tag = ' [하도추적]' if rp else ''
+            self._on_log(f'연결: {sname} → {dname}{reach_tag}')
         self.redraw()
 
     def _edit_node_dialog(self, node):
@@ -1192,7 +1319,7 @@ class NetworkCanvas(tk.Canvas):
                     emit_reach(uid, nid)
                 N = len(up_ids)
                 if N >= 2:
-                    ops.append({'type': 'COMBINE', 'name': node.name, 'N': N})
+                    errors.append(f"출구 '{node.name}'에 {N}개 직접 연결 — 합류점(JUNCTION) 노드를 사용하세요.")
 
         dfs(outlet.id)
 
@@ -1269,28 +1396,64 @@ class NetworkCanvas(tk.Canvas):
                             self.edges[edge.id] = edge
                 stack.append(nm)
 
-        # Add OUTLET for last item on stack
-        if stack:
-            last_nm = stack[-1]
+        # Add OUTLET — 스택에 1개만 남은 경우에만 OUT 자동 생성
+        # 2개 이상 남은 경우 HC N + OUT 카드 누락 → 원본 그대로 배열 (경고는 호출부에서 표시)
+        if len(stack) == 1:
             out_node = NetworkNode('OUTLET', 'OUT', 0, 0, {})
             self.nodes[out_node.id] = out_node
-            pr = pending_reach.pop(last_nm, None)
-            if pr and last_nm in name_to_node:
-                reach_nm, rp = pr
-                edge = NetworkEdge(name_to_node[last_nm].id, out_node.id,
-                                   reach_params=rp, label=reach_nm)
-            elif last_nm in name_to_node:
-                edge = NetworkEdge(name_to_node[last_nm].id, out_node.id)
-            else:
-                edge = None
-            if edge:
+            nm = stack[0]
+            if nm in name_to_node:
+                pr = pending_reach.pop(nm, None)
+                if pr:
+                    reach_nm, rp = pr
+                    edge = NetworkEdge(name_to_node[nm].id, out_node.id,
+                                       reach_params=rp, label=reach_nm)
+                else:
+                    edge = NetworkEdge(name_to_node[nm].id, out_node.id)
                 self.edges[edge.id] = edge
 
         self._auto_layout()
         self.redraw()
 
+    def load_canvas_state(self, data):
+        """캔버스 전체 상태(노드 위치 포함) 복원."""
+        self.clear()
+        # 노드 복원
+        max_nid = 0
+        for nd in data.get('nodes', []):
+            n = NetworkNode(nd['type'], nd['name'], nd['x'], nd['y'],
+                            params=nd.get('params'))
+            n.id = nd['id']
+            self.nodes[n.id] = n
+            if n.id > max_nid: max_nid = n.id
+        NetworkNode._counter = max_nid
+
+        # 엣지 복원
+        max_eid = 0
+        for ed in data.get('edges', []):
+            e = NetworkEdge(ed['src'], ed['dst'],
+                            src_dir=ed.get('src_dir'),
+                            dst_dir=ed.get('dst_dir'),
+                            reach_params=ed.get('reach_params'),
+                            label=ed.get('label'))
+            e.id = ed['id']
+            self.edges[e.id] = e
+            if e.id > max_eid: max_eid = e.id
+        NetworkEdge._counter = max_eid
+
+        # world_bbox를 노드 위치 기반으로 재계산
+        if self.nodes:
+            G = self.GRID
+            max_x = max(n.x for n in self.nodes.values()) + 6 * G
+            max_y = max(n.y for n in self.nodes.values()) + 6 * G
+            self._world_bbox = (0, 0, int(max(max_x, 2000)), int(max(max_y, 900)))
+        self._update_scrollregion()
+        self.redraw()
+
     def _auto_layout(self):
         if not self.nodes: return
+
+        # ── 인접 리스트 ──────────────────────────────────────────────────────
         preds = {n.id: [] for n in self.nodes.values()}
         succs = {n.id: [] for n in self.nodes.values()}
         for e in self.edges.values():
@@ -1298,104 +1461,219 @@ class NetworkCanvas(tk.Canvas):
                 preds[e.dst].append(e.src)
                 succs[e.src].append(e.dst)
 
-        outlets = [n.id for n in self.nodes.values() if n.type == 'OUTLET']
-        if not outlets:
-            self._layout_bfs(preds, succs); return
-        outlet_id = outlets[0]
+        G      = self.GRID        # 40
+        STEP_X = 5 * G            # 200  수평 간격
+        STEP_Y = 5 * G            # 200  수직 밴드 간격
+        MX     = 8 * G            # 320  좌측 여백
+        MAIN_Y = 10 * G           # 400  본류 Y
 
-        # Longest-path depth from each node to outlet (reverse BFS)
+        BACKBONE = {'JUNCTION', 'RESERVOIR', 'OUTLET'}
+
+        # ── 헬퍼 ─────────────────────────────────────────────────────────────
+        def has_reach(pred_id, junc_id):
+            return any(e.src == pred_id and e.dst == junc_id and e.reach_params
+                       for e in self.edges.values())
+
+        def upstream_size(nid):
+            seen, q = set(), [nid]
+            while q:
+                n = q.pop()
+                if n in seen: continue
+                seen.add(n); q.extend(preds[n])
+            return len(seen)
+
+        # ── OUTLET 판별 ────────────────────────────────────────────────────
+        # 명시적 OUTLET 없으면 backbone successor 없는 terminal 중 가장 큰 upstream
+        outlets = [n.id for n in self.nodes.values() if n.type == 'OUTLET']
+        if outlets:
+            outlet_id = outlets[0]
+        else:
+            terminal_bb = [n.id for n in self.nodes.values()
+                           if n.type in BACKBONE
+                           and not any(self.nodes[s].type in BACKBONE
+                                       for s in succs[n.id] if s in self.nodes)]
+            if not terminal_bb:
+                self._layout_bfs(preds, succs); return
+            outlet_id = max(terminal_bb, key=upstream_size)
+
+        # ── Step 2: Backbone depth BFS (backbone 노드만) ─────────────────────
         depth = {outlet_id: 0}
         queue = [outlet_id]
         while queue:
             nid = queue.pop(0)
             for c in preds[nid]:
-                nd = depth[nid] + 1
-                if nd > depth.get(c, -1):
-                    depth[c] = nd
-                    queue.append(c)
+                if self.nodes[c].type in BACKBONE:
+                    nd = depth[nid] + 1
+                    if nd > depth.get(c, -1):
+                        depth[c] = nd; queue.append(c)
         for n in self.nodes.values():
             if n.id not in depth:
                 depth[n.id] = 0
-        max_depth = max(depth.values()) if depth else 0
 
-        G      = self.GRID   # 40
-        STEP_X = 5 * G       # 200  본류 수평 간격
-        STEP_Y = 3 * G       # 120  지류 수직 간격
-        MX     = 3 * G       # 120  좌측 여백
-        MAIN_Y = 8 * G       # 320  본류 y 좌표
-
-        # reach 엣지 연결 여부 조회 (본류 판별용)
-        def has_reach(pred_id, junc_id):
-            return any(e.src == pred_id and e.dst == junc_id and e.reach_params
-                       for e in self.edges.values())
-
-        # 본류 탐색: depth 최대 + reach 연결 우선
+        # ── Step 3: Main chain (backbone only) ───────────────────────────────
         main_chain = [outlet_id]
         cur = outlet_id
         while True:
-            cands = preds[cur]
+            cands = [p for p in preds[cur] if self.nodes[p].type in BACKBONE]
             if not cands: break
-            nxt = max(cands, key=lambda nid: (
-                depth.get(nid, 0),
-                1 if has_reach(nid, cur) else 0
+            nxt = max(cands, key=lambda n: (
+                depth.get(n, 0),
+                1 if has_reach(n, cur) else 0,
+                upstream_size(n)
             ))
-            main_chain.append(nxt)
-            cur = nxt
-        main_chain.reverse()    # 상류 → 하류
+            main_chain.append(nxt); cur = nxt
+        main_chain.reverse()   # 상류 → 하류
         main_set = set(main_chain)
 
+        # ── Step 4: Sub-junction 탐색 ────────────────────────────────────────
+        # backbone이지만 main_chain에 없는 노드 중 main_chain 노드에 직접 연결되는 것
+        sub_junctions = {}   # sj_id → mc_id (연결되는 본류 합류점)
+        for mc_id in main_chain:
+            for p in preds[mc_id]:
+                if p not in main_set and self.nodes[p].type in {'JUNCTION', 'RESERVOIR'}:
+                    sub_junctions[p] = mc_id
+
+        # ── Step 5: 본류 노드 X 위치 ─────────────────────────────────────────
+        max_depth = max(depth[n] for n in main_chain) if main_chain else 0
         positions = {}
+        taken = set()
         for nid in main_chain:
             col = max_depth - depth[nid]
-            positions[nid] = (MX + col * STEP_X, MAIN_Y)
+            x = MX + col * STEP_X
+            positions[nid] = (x, MAIN_Y)
+            taken.add((x, MAIN_Y))
 
-        # 지류 서브트리: 합류점 기준 상하 교번 배치
-        above = {}
-        below = {}
+        # ── Step 6: 서브 합류점 배치 (본류 노드 바로 위, 동일 X) ─────────────
+        SJ_Y = MAIN_Y - STEP_Y   # 200
+        for sj_id, mc_id in sub_junctions.items():
+            x = positions[mc_id][0]
+            # 같은 X에 서브 합류점이 이미 있으면 한 칸 왼쪽으로 이동
+            y = SJ_Y
+            while (x, y) in taken:
+                x -= STEP_X
+            positions[sj_id] = (x, y)
+            taken.add((x, y))
 
-        def place_subtree(root_id, junc_id, side):
-            if root_id in positions: return
-            junc_x = positions[junc_id][0]
-            if side < 0:
-                row = above.get(junc_id, 1); above[junc_id] = row + 1
-                base_y = MAIN_Y - row * STEP_Y
-            else:
-                row = below.get(junc_id, 1); below[junc_id] = row + 1
-                base_y = MAIN_Y + row * STEP_Y
-            sub_depth = {root_id: 0}
-            q = [root_id]
-            while q:
-                nid2 = q.pop(0)
-                for c in preds[nid2]:
-                    if c not in positions and c not in sub_depth:
-                        sub_depth[c] = sub_depth[nid2] + 1
-                        q.append(c)
-            by_level = {}
-            for nid2, lv in sub_depth.items():
-                by_level.setdefault(lv, []).append(nid2)
-            for lv, nids in by_level.items():
-                x = junc_x - (lv + 1) * STEP_X
-                for k, nid2 in enumerate(nids):
-                    y = base_y + k * STEP_Y * side
-                    positions[nid2] = (x, y)
+        # ── Step 6.5: 서브 합류점 reach-소유역이 점유할 X 위치 사전 계산 ─────
+        # Step 7에서 위쪽 배치 시 해당 위치와 충돌하지 않도록 forced_below_mcs 구성
+        forced_below_mcs = set()
+        for sj_id, mc_id in sub_junctions.items():
+            # 서브 합류점 자체가 (mc_x, SJ_Y) 를 점유 → 해당 mc_id 아래 강제
+            forced_below_mcs.add(mc_id)
+            sj_x = positions[sj_id][0]
+            # reach-연결 소유역이 (sj_x - STEP_X, SJ_Y) 쪽에 배치될 예정
+            for sb_id in preds[sj_id]:
+                if self.nodes[sb_id].type == 'SUBBASIN' and has_reach(sb_id, sj_id):
+                    x = sj_x - STEP_X
+                    while (x, SJ_Y) in taken:
+                        x -= STEP_X
+                    # 이 X를 가진 본류 합류점도 아래 강제
+                    for other_mc in main_chain:
+                        if positions[other_mc][0] == x:
+                            forced_below_mcs.add(other_mc)
 
-        side = -1
-        for junc_id in main_chain:
-            tribs = [p for p in preds[junc_id] if p not in main_set]
-            for trib_id in tribs:
-                place_subtree(trib_id, junc_id, side)
-                side = -side
+        # ── Step 7: 본류 소유역 배치 ─────────────────────────────────────────
+        above_cnt = {}   # mc_id → 위 방향 배치 횟수
+        below_cnt = {}   # mc_id → 아래 방향 배치 횟수
 
-        # 위치 적용
+        for mc_id in main_chain:
+            mc_x = positions[mc_id][0]
+            force_below = mc_id in forced_below_mcs
+            direct_sb = [p for p in preds[mc_id]
+                         if p not in main_set
+                         and p not in sub_junctions
+                         and self.nodes[p].type == 'SUBBASIN']
+            # reach 연결 먼저, 이후 name 순
+            direct_sb.sort(key=lambda n: (0 if has_reach(n, mc_id) else 1,
+                                          self.nodes[n].name))
+            for i, sb_id in enumerate(direct_sb):
+                if not force_below and i % 2 == 0:   # 짝수 → 위 (강제 아래 아닐 때만)
+                    row = above_cnt.get(mc_id, 0)
+                    y = MAIN_Y - (row + 1) * STEP_Y
+                    above_cnt[mc_id] = row + 1
+                    while (mc_x, y) in taken:
+                        y -= STEP_Y
+                else:                                 # 아래
+                    row = below_cnt.get(mc_id, 0)
+                    y = MAIN_Y + (row + 1) * STEP_Y
+                    below_cnt[mc_id] = row + 1
+                    while (mc_x, y) in taken:
+                        y += STEP_Y
+                positions[sb_id] = (mc_x, y)
+                taken.add((mc_x, y))
+
+        # ── Step 8: 서브 합류점 소유역 배치 ──────────────────────────────────
+        for sj_id in sub_junctions:
+            sj_x, sj_y = positions[sj_id]
+            sb_list = [p for p in preds[sj_id]
+                       if self.nodes[p].type == 'SUBBASIN']
+            sb_list.sort(key=lambda n: (0 if has_reach(n, sj_id) else 1,
+                                        self.nodes[n].name))
+            for sb_id in sb_list:
+                if has_reach(sb_id, sj_id):
+                    # reach 연결 → 서브 합류점 왼쪽, 동일 Y (수평 직선)
+                    x = sj_x - STEP_X
+                    while (x, sj_y) in taken:
+                        x -= STEP_X
+                    positions[sb_id] = (x, sj_y)
+                else:
+                    # 서브 합류점 위쪽 (수직 직선)
+                    y = sj_y - STEP_Y
+                    while (sj_x, y) in taken:
+                        y -= STEP_Y
+                    positions[sb_id] = (sj_x, y)
+                taken.add(positions[sb_id])
+
+        # ── Step 9: 고아 노드 처리 (클러스터 인식) ───────────────────────────
+        orphan_ids = [n.id for n in self.nodes.values() if n.id not in positions]
+        if orphan_ids:
+            orphan_set = set(orphan_ids)
+            o_preds = {n: [p for p in preds[n] if p in orphan_set] for n in orphan_set}
+            o_succs = {n: [s for s in succs[n] if s in orphan_set] for n in orphan_set}
+            cluster_roots = [n for n in orphan_set if not o_succs[n]] or list(orphan_set)
+            fb_x = MX + (max_depth + 2) * STEP_X
+            fb_y = MAIN_Y
+            placed = set()
+            for root in sorted(cluster_roots, key=lambda n: self.nodes[n].name):
+                while (fb_x, fb_y) in taken:
+                    fb_y += STEP_Y
+                positions[root] = (fb_x, fb_y)
+                taken.add((fb_x, fb_y))
+                placed.add(root)
+                above_c = 0
+                for p in sorted(o_preds.get(root, []),
+                                key=lambda n: (0 if has_reach(n, root) else 1,
+                                               self.nodes[n].name)):
+                    if p in placed:
+                        continue
+                    if has_reach(p, root):
+                        x = fb_x - STEP_X
+                        while (x, fb_y) in taken:
+                            x -= STEP_X
+                        positions[p] = (x, fb_y)
+                    else:
+                        above_c += 1
+                        y = fb_y - above_c * STEP_Y
+                        while (fb_x, y) in taken:
+                            y -= STEP_Y
+                        positions[p] = (fb_x, y)
+                    taken.add(positions[p])
+                    placed.add(p)
+                fb_y += STEP_Y
+            for nid in orphan_ids:
+                if nid not in placed:
+                    while (fb_x, fb_y) in taken:
+                        fb_y += STEP_Y
+                    positions[nid] = (fb_x, fb_y)
+                    taken.add((fb_x, fb_y))
+                    fb_y += STEP_Y
+
+        # ── Step 10: 위치 적용 + y < G 보정 + world_bbox 갱신 ────────────────
         for nid, (x, y) in positions.items():
             if nid in self.nodes:
                 self.nodes[nid].x = float(x)
                 self.nodes[nid].y = float(y)
-        for n in self.nodes.values():
-            if n.id not in positions:
-                n.x = float(MX); n.y = float(MAIN_Y + 2 * STEP_Y)
 
-        # y < G 이면 전체 아래로 이동
         min_y = min(n.y for n in self.nodes.values())
         if min_y < G:
             shift = round((G - min_y) / G) * G
@@ -1405,9 +1683,7 @@ class NetworkCanvas(tk.Canvas):
         max_x = max(n.x for n in self.nodes.values()) + 3 * STEP_X
         max_y = max(n.y for n in self.nodes.values()) + 3 * STEP_Y
         self._world_bbox = (0, 0, int(max(max_x, 2000)), int(max(max_y, 900)))
-        W = self._world_bbox[2] * self._zoom
-        H = self._world_bbox[3] * self._zoom
-        self.configure(scrollregion=(0, 0, int(W), int(H)))
+        self._update_scrollregion()
 
     def _layout_bfs(self, preds, succs):
         """Fallback BFS level layout for networks without a clear outlet."""
@@ -1433,6 +1709,8 @@ class NetworkCanvas(tk.Canvas):
             for i, nid in enumerate(nids):
                 self.nodes[nid].x = float(x)
                 self.nodes[nid].y = float(start_y + i * STEP_Y)
+        self._world_bbox = (0, 0, 2000, 1200)
+        self._update_scrollregion()
 
 
 # =============================================================================
@@ -1494,7 +1772,7 @@ class NodeEditDialog(ctk.CTkToplevel):
             row(r, '세분할 NSTPS (0=자동)',  'NSTPS', node.params.get('NSTPS', 0));  r += 1
             ctk.CTkLabel(frame, text='※ 안정: 2Kx ≤ Δt ≤ 2K(1-x)\n   NSTPS=0 → 자동',
                          font=('맑은 고딕', 9), text_color='gray',
-                         wraplength=260, justify='left').grid(
+                         wraplength=208, justify='left').grid(
                 row=r, column=0, columnspan=2, pady=(0,6)); r += 1
         elif node.type == 'JUNCTION':
             ctk.CTkLabel(frame, text='입력 수 N은 연결에서 자동 결정됩니다.',
@@ -1531,24 +1809,39 @@ class NodeEditDialog(ctk.CTkToplevel):
 
 class PalettePanel(ctk.CTkFrame):
     def __init__(self, master, on_type_select, **kwargs):
-        super().__init__(master, width=170, **kwargs)
+        super().__init__(master, width=280, **kwargs)
+        self.pack_propagate(False)
         self._callback = on_type_select
         self._build()
 
     def _build(self):
-        ctk.CTkLabel(self, text='수문 요소', font=FONT_HEADER,
-                     text_color='#5dade2').pack(pady=(14, 6))
-
-        self._item('SUBBASIN', NODE_STYLES['SUBBASIN'])
-        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(6, 2))
+        for ntype in ('SUBBASIN',):
+            self._item(ntype, NODE_STYLES[ntype])
         self._item_reach_edge()
-        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=(2, 6))
         for ntype in ('RESERVOIR', 'JUNCTION', 'OUTLET'):
             self._item(ntype, NODE_STYLES[ntype])
 
-        ctk.CTkLabel(self, text='클릭 후 캔버스에\n배치하세요',
-                     font=('맑은 고딕', 9), text_color='gray',
-                     justify='center').pack(pady=(4, 0))
+        # ── 활동 로그 ─────────────────────────────────────────────────────────
+        ctk.CTkFrame(self, height=1, fg_color='#333344').pack(fill='x', padx=8, pady=6)
+        ctk.CTkLabel(self, text='활동 로그', font=('맑은 고딕', 9),
+                     text_color='#5dade2').pack(anchor='w', padx=10)
+        log_outer = ctk.CTkFrame(self, fg_color='#0d0d1a', corner_radius=6)
+        log_outer.pack(fill='both', expand=True, padx=6, pady=(2, 6))
+        ysb = tk.Scrollbar(log_outer, orient='vertical')
+        ysb.pack(side='right', fill='y')
+        self._log_text = tk.Text(log_outer, wrap='word', bg='#0d0d1a', fg='#999999',
+                                 font=('맑은 고딕', 8), relief='flat', width=1,
+                                 yscrollcommand=ysb.set, state='disabled')
+        self._log_text.pack(fill='both', expand=True, padx=2, pady=2)
+        ysb.configure(command=self._log_text.yview)
+
+    def log(self, msg):
+        from datetime import datetime
+        self._log_text.configure(state='normal')
+        self._log_text.insert('end', f'[{datetime.now().strftime("%H:%M:%S")}] {msg}\n')
+        self._log_text.see('end')
+        self._log_text.configure(state='disabled')
+
 
     def _item(self, ntype, style):
         frame = ctk.CTkFrame(self, corner_radius=8, fg_color='#1a1a2e',
@@ -1556,14 +1849,10 @@ class PalettePanel(ctk.CTkFrame):
         frame.pack(fill='x', padx=8, pady=4)
 
         mini = tk.Canvas(frame, width=148, height=48, bg='#1a1a2e', highlightthickness=0)
-        mini.pack(pady=(6, 0))
+        mini.pack(pady=4)
         self._draw_mini(mini, ntype, style)
 
-        lbl = ctk.CTkLabel(frame, text=style['label'],
-                           font=FONT_SMALL, text_color=style['outline'])
-        lbl.pack(pady=(2, 6))
-
-        for w in (frame, mini, lbl):
+        for w in (frame, mini):
             w.bind('<Button-1>', lambda e, t=ntype: self._callback(t))
             w.configure(cursor='hand2')
 
@@ -1573,8 +1862,7 @@ class PalettePanel(ctk.CTkFrame):
         frame.pack(fill='x', padx=8, pady=4)
 
         mini = tk.Canvas(frame, width=148, height=48, bg='#1a1a2e', highlightthickness=0)
-        mini.pack(pady=(6, 0))
-        # Draw: line → [parallelogram] → arrow
+        mini.pack(pady=4)
         cy = 24
         mini.create_line(4, cy, 44, cy, fill='#2980b9', width=2)
         off = 6
@@ -1585,11 +1873,11 @@ class PalettePanel(ctk.CTkFrame):
         mini.create_text(74, cy, text='하도추적', fill='white',
                          font=('맑은 고딕', 9, 'bold'))
 
-        lbl = ctk.CTkLabel(frame, text='하도추적 (엣지)',
-                           font=FONT_SMALL, text_color='#2980b9')
-        lbl.pack(pady=(2, 6))
+        hint = ctk.CTkLabel(frame, text='연결선 선택 후 클릭',
+                            font=('맑은 고딕', 8), text_color='#7f8c8d')
+        hint.pack(pady=(0, 4))
 
-        for w in (frame, mini, lbl):
+        for w in (frame, mini, hint):
             w.bind('<Button-1>', lambda e: self._callback('REACH_EDGE'))
             w.configure(cursor='hand2')
 
@@ -1605,7 +1893,7 @@ class PalettePanel(ctk.CTkFrame):
                 pts.extend([cx + 26 * math.cos(ang), cy + 20 * math.sin(ang)])
             c.create_polygon(*pts, fill=fill, outline=out, width=2)
         elif ntype == 'JUNCTION':
-            c.create_oval(cx-18, cy-18, cx+18, cy+18, fill=fill, outline=out, width=2)
+            c.create_oval(cx-22, cy-22, cx+22, cy+22, fill=fill, outline=out, width=2)
         elif ntype == 'OUTLET':
             c.create_rectangle(cx-24, cy-17, cx+24, cy+17, fill=fill, outline=out, width=2)
         c.create_text(cx, cy, text=style['label'], fill='white',
@@ -1622,21 +1910,83 @@ class PalettePanel(ctk.CTkFrame):
 # 속성 패널 (우측)
 # =============================================================================
 
-class PropertiesPanel(ctk.CTkScrollableFrame):
-    def __init__(self, master, redraw_cb=None, **kwargs):
-        super().__init__(master, width=260, **kwargs)
-        self._node    = None
-        self._edge    = None
-        self._entries = {}
-        self._svars   = {}  # slider DoubleVars
-        self._redraw  = redraw_cb
+class PropertiesPanel(tk.Frame):
+    def __init__(self, master, redraw_cb=None, canvas_ref=None, **kwargs):
+        kwargs.pop('corner_radius', None)   # tk.Frame 미지원 인자 제거
+        super().__init__(master, bg='#1e1e2e', **kwargs)
+        self._node       = None
+        self._edge       = None
+        self._entries    = {}
+        self._svars      = {}
+        self._redraw     = redraw_cb
+        self._canvas_ref = canvas_ref
+
+        # ── 헤더 (파일명 + 구분선 + 제목) ──
+        hdr = tk.Frame(self, bg='#1a1a2e')
+        hdr.pack(fill='x', side='top')
+        self._filename_lbl = ctk.CTkLabel(
+            hdr, text='(저장 파일 없음)',
+            font=FONT_SMALL, text_color='gray',
+            wraplength=210, justify='center')
+        self._filename_lbl.pack(fill='x', padx=6, pady=(6, 2))
+        tk.Frame(hdr, height=1, bg='#3a3a5e').pack(fill='x', padx=6, pady=2)
+        ctk.CTkLabel(hdr, text='노드속성', font=FONT_HEADER,
+                     text_color='#5dade2').pack(pady=(4, 6))
+
+        # ── 분리창 (드래그 가능 구분선) ──
+        # tk.PanedWindow 의 pane 자식은 반드시 tk.Frame 이어야 함
+        self._pane = tk.PanedWindow(self, orient='vertical',
+                                    bg='#2a2a4a', sashwidth=6, sashpad=1,
+                                    sashrelief='raised', handlesize=0,
+                                    showhandle=False)
+        self._pane.pack(fill='both', expand=True)
+
+        # 상단: 노드속성 스크롤 — tk.Frame 래퍼 안에 CTkScrollableFrame
+        scroll_wrapper = tk.Frame(self._pane, bg='#1e1e2e')
+        self._pane.add(scroll_wrapper, minsize=60, stretch='always')
+        self._scroll = ctk.CTkScrollableFrame(scroll_wrapper, corner_radius=0)
+        self._scroll.pack(fill='both', expand=True)
+
+        # 하단: HEC-1 .dat 미리보기 — tk.Frame 래퍼
+        dat_wrapper = tk.Frame(self._pane, bg='#0d1117')
+        self._pane.add(dat_wrapper, minsize=60, stretch='always')
+
+        dat_hdr = tk.Frame(dat_wrapper, bg='#1a1a2e')
+        dat_hdr.pack(fill='x')
+        self._dat_title_lbl = ctk.CTkLabel(dat_hdr, text='(파일 없음) .dat 미리보기',
+                                           font=FONT_SMALL, text_color='#5dade2')
+        self._dat_title_lbl.pack(side='left', padx=8, pady=3)
+        self._dat_text = ctk.CTkTextbox(
+            dat_wrapper, font=FONT_LOG,
+            fg_color='#0d1117', text_color='#7ec8e3',
+            corner_radius=0, state='disabled', wrap='none')
+        self._dat_text.pack(fill='both', expand=True)
+
+        # 초기 sash 위치: 전체 높이의 55%
+        self.after(300, self._set_initial_sash)
         self._show_empty()
 
+    def _set_initial_sash(self):
+        h = self._pane.winfo_height()
+        if h > 20:
+            self._pane.sash_place(0, 0, max(60, int(h * 0.55)))
+
+    def set_filename(self, path):
+        name = os.path.basename(path) if path else '(저장 파일 없음)'
+        self._filename_lbl.configure(text=name)
+
+    def set_dat_title(self, title: str):
+        self._dat_title_lbl.configure(text=title)
+
+    def update_dat_preview(self, content: str):
+        self._dat_text.configure(state='normal')
+        self._dat_text.delete('1.0', 'end')
+        self._dat_text.insert('1.0', content)
+        self._dat_text.configure(state='disabled')
+
     def _show_empty(self):
-        for w in self.winfo_children(): w.destroy()
-        ctk.CTkLabel(self, text='노드 속성', font=FONT_HEADER,
-                     text_color='#5dade2').pack(anchor='w', padx=12, pady=(14,4))
-        ctk.CTkLabel(self, text='노드를 선택하면\n속성이 여기에 표시됩니다.',
+        for w in self._scroll.winfo_children(): w.destroy()
+        ctk.CTkLabel(self._scroll, text='노드를 선택하면\n속성이 여기에 표시됩니다.',
                      font=FONT_SMALL, text_color='gray',
                      justify='center').pack(pady=30)
 
@@ -1644,7 +1994,7 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
         self._node = node
         self._entries.clear()
         self._svars.clear()
-        for w in self.winfo_children(): w.destroy()
+        for w in self._scroll.winfo_children(): w.destroy()
 
         if node is None:
             self._show_empty()
@@ -1653,11 +2003,8 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
         style = NODE_STYLES.get(node.type, {})
         col   = style.get('outline', 'white')
 
-        ctk.CTkLabel(self, text='노드 속성', font=FONT_HEADER,
-                     text_color='#5dade2').pack(anchor='w', padx=12, pady=(14,2))
-
-        badge = ctk.CTkFrame(self, fg_color=style.get('fill', '#333'), corner_radius=6)
-        badge.pack(fill='x', padx=10, pady=4)
+        badge = ctk.CTkFrame(self._scroll, fg_color=style.get('fill', '#333'), corner_radius=6)
+        badge.pack(fill='x', padx=10, pady=(8, 4))
         ctk.CTkLabel(badge, text=f'● {style.get("label", node.type)}',
                      font=FONT_HEADER, text_color=col).pack(anchor='w', padx=8, pady=6)
 
@@ -1670,6 +2017,8 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
             self._add_field('유출곡선지수 CN',    'CN', node.params.get('CN', 80.0))
             self._add_field('도달시간 Tc (hr)',   'Tc', node.params.get('Tc', 1.0))
             self._add_field('저류상수 R (hr)',    'R',  node.params.get('R',  1.5))
+            self._section('─── Huff 강우시간분포 ───')
+            self._add_huff_field(node)
 
         elif node.type == 'RESERVOIR':
             self._section('─── 저수지 매개변수 ───')
@@ -1678,56 +2027,111 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
             self._add_field('여수로 길이 L (m)',       'L',     node.params.get('L',     10.0))
             self._add_field('여수로 마루고 Hc (m)',    'Hc',    node.params.get('Hc',    3.0))
             self._add_field('초기 저류량 S0 (m³)',     'S0',    node.params.get('S0',    0.0))
-            ctk.CTkLabel(self, text='※ Q = Cd×L×(H-Hc)^1.5 (광정위어)\n   S = A_avg × H',
-                         font=('맑은 고딕', 9), text_color='gray',
-                         wraplength=230, justify='left').pack(anchor='w', padx=12, pady=2)
+            ctk.CTkLabel(self._scroll,
+                         text='※ Q = Cd×L×(H-Hc)^1.5 (광정위어)\n   S = A_avg × H',
+                         font=FONT_SMALL, text_color='gray',
+                         wraplength=210, justify='left').pack(anchor='w', padx=12, pady=2)
 
         elif node.type == 'REACH':
-            self._section('─── 머스킹엄 매개변수 ───')
+            self._section('─── Muskingum 매개변수 ───')
             self._add_field('저류계수 K (hr)', 'K', node.params.get('K', 1.0))
             self._add_slider('가중계수 X',     'X', node.params.get('X', 0.20), 0.0, 0.5)
             self._add_field('NSTPS (0=자동)',  'NSTPS', node.params.get('NSTPS', 0))
-            ctk.CTkLabel(self, text='※ 안정: 2Kx ≤ Δt ≤ 2K(1-x)',
-                         font=('맑은 고딕', 9), text_color='gray',
-                         wraplength=220).pack(anchor='w', padx=12, pady=2)
-
-        elif node.type == 'JUNCTION':
-            ctk.CTkLabel(self, text='N 입력 수는 연결에서\n자동으로 결정됩니다.',
+            ctk.CTkLabel(self._scroll, text='※ 안정: 2Kx ≤ Δt ≤ 2K(1-x)',
                          font=FONT_SMALL, text_color='gray',
-                         justify='center').pack(pady=10)
+                         wraplength=200).pack(anchor='w', padx=12, pady=2)
 
-        elif node.type == 'OUTLET':
-            ctk.CTkLabel(self, text='출구 노드 — 최종 유출점',
-                         font=FONT_SMALL, text_color='gray').pack(pady=10)
+        elif node.type in ('JUNCTION', 'OUTLET'):
+            n_in = 0
+            if self._canvas_ref:
+                n_in = sum(1 for e in self._canvas_ref.edges.values()
+                           if e.dst == node.id)
+            label_txt = ('합류점' if node.type == 'JUNCTION' else '출구') + ' 노드'
+            ctk.CTkLabel(self._scroll, text=label_txt,
+                         font=FONT_SMALL, text_color='gray').pack(pady=(8, 2))
+            n_color = '#27ae60' if n_in >= 2 else ('#e74c3c' if n_in == 0 else '#f39c12')
+            ctk.CTkLabel(self._scroll, text=f'현재 N = {n_in}  (연결 수 자동 계산)',
+                         font=FONT_HEADER, text_color=n_color).pack(pady=(2, 8))
 
-        ctk.CTkButton(self, text='적용', command=self._apply,
+        ctk.CTkButton(self._scroll, text='적용', command=self._apply,
                       font=FONT_BTN, fg_color='#27ae60', hover_color='#2ecc71',
                       height=34).pack(fill='x', padx=10, pady=(14, 4))
 
     def _section(self, text):
-        ctk.CTkLabel(self, text=text, font=FONT_SMALL,
+        ctk.CTkLabel(self._scroll, text=text, font=FONT_SMALL,
                      text_color='gray').pack(fill='x', padx=12, pady=(8, 2))
 
     def _add_field(self, label, key, default, is_str=False):
-        ctk.CTkLabel(self, text=label, font=FONT_SMALL,
+        ctk.CTkLabel(self._scroll, text=label, font=FONT_SMALL,
                      anchor='w').pack(fill='x', padx=12, pady=(4, 0))
-        ent = ctk.CTkEntry(self, font=FONT_SMALL,
+        ent = ctk.CTkEntry(self._scroll, font=FONT_SMALL,
                            justify='left' if is_str else 'right')
         ent.insert(0, str(default))
         ent.pack(fill='x', padx=10, pady=(0, 2))
         self._entries[key] = ent
 
     def _add_slider(self, label, key, default, from_, to):
-        lbl = ctk.CTkLabel(self, text=f'{label}: {default:.2f}',
+        lbl = ctk.CTkLabel(self._scroll, text=f'{label}: {default:.2f}',
                            font=FONT_SMALL, anchor='w')
         lbl.pack(fill='x', padx=12, pady=(4, 0))
         var = ctk.DoubleVar(value=default)
         def on_change(v, _lbl=lbl, _label=label):
             _lbl.configure(text=f'{_label}: {float(v):.2f}')
-        slider = ctk.CTkSlider(self, from_=from_, to=to, variable=var,
+        slider = ctk.CTkSlider(self._scroll, from_=from_, to=to, variable=var,
                                number_of_steps=50, command=on_change)
         slider.pack(fill='x', padx=10, pady=(0, 2))
         self._svars[key] = var
+
+    def _add_huff_field(self, node):
+        """SUBBASIN 전용: Huff 분위 콤보 + 커스텀 PC 입력 텍스트박스."""
+        preset_key = node.params.get('huff_preset', '3분위')
+        pc_raw = node.params.get('huff_pc', HUFF_PRESETS.get(preset_key, HUFF_PRESETS['3분위']))
+
+        # 분위 콤보
+        combo_row = tk.Frame(self._scroll, bg='#1e1e2e')
+        combo_row.pack(fill='x', padx=10, pady=(4, 0))
+        ctk.CTkLabel(combo_row, text='분위', font=FONT_SMALL,
+                     width=50, anchor='w').pack(side='left')
+        preset_var = ctk.StringVar(value=preset_key)
+        self._svars['huff_preset'] = preset_var
+
+        def _on_preset(choice):
+            if choice in HUFF_PRESETS:
+                vals = HUFF_PRESETS[choice]
+                pc_box.configure(state='normal')
+                pc_box.delete('1.0', 'end')
+                pc_box.insert('1.0', '  '.join(f'{v:.3f}' for v in vals))
+                pc_box.configure(state='normal')
+
+        combo = ctk.CTkComboBox(combo_row, values=list(HUFF_PRESETS.keys()),
+                                variable=preset_var, width=120,
+                                font=FONT_SMALL, command=_on_preset)
+        combo.pack(side='right')
+
+        # PC 값 텍스트박스 (빈칸 또는 컴마 구분)
+        ctk.CTkLabel(self._scroll, text='누적 백분율 (빈칸/컴마 구분)',
+                     font=FONT_SMALL, text_color='gray',
+                     anchor='w').pack(fill='x', padx=12, pady=(4, 0))
+        pc_box = ctk.CTkTextbox(self._scroll, font=FONT_LOG,
+                                height=52, corner_radius=4, wrap='word')
+        pc_box.insert('1.0', '  '.join(f'{v:.3f}' for v in pc_raw))
+        pc_box.pack(fill='x', padx=10, pady=(0, 4))
+        self._entries['__huff_pc_box__'] = pc_box
+
+    @staticmethod
+    def _parse_huff_pc(text: str) -> list:
+        """빈칸·탭·컴마 구분자로 PC 값 파싱 (HEC-1_FINAL.py 동일 로직)."""
+        import re
+        parts = re.split(r'[,\s\t]+', text.strip())
+        result = []
+        for p in parts:
+            p = p.strip()
+            if p:
+                try:
+                    result.append(float(p))
+                except ValueError:
+                    pass
+        return result
 
     def _apply(self):
         if not self._node: return
@@ -1737,52 +2141,87 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
                 v = nm.get().strip()
                 if v: self._node.name = v
             for key, ent in self._entries.items():
-                if key == 'name': continue
+                if key in ('name', '__huff_pc_box__', '__label__'): continue
                 v = ent.get().strip()
                 self._node.params[key] = int(float(v)) if key == 'NSTPS' else float(v)
             for key, var in self._svars.items():
-                self._node.params[key] = round(float(var.get()), 4)
+                if key == 'huff_preset':
+                    self._node.params['huff_preset'] = var.get()
+                else:
+                    self._node.params[key] = round(float(var.get()), 4)
+            # Huff PC 파싱 저장
+            pc_box = self._entries.get('__huff_pc_box__')
+            if pc_box and self._node.type == 'SUBBASIN':
+                pc_list = self._parse_huff_pc(pc_box.get('1.0', 'end'))
+                if pc_list:
+                    self._node.params['huff_pc'] = pc_list
             if self._redraw: self._redraw()
         except ValueError as e:
             messagebox.showerror('입력 오류', str(e))
 
     def show_edge(self, edge):
-        """Display reach edge properties for editing."""
         self._node = None
         self._edge = edge if hasattr(edge, 'reach_params') else None
         self._entries.clear()
         self._svars.clear()
-        for w in self.winfo_children(): w.destroy()
+        for w in self._scroll.winfo_children(): w.destroy()
 
-        if edge is None or not getattr(edge, 'reach_params', None):
+        if edge is None:
             self._show_empty()
             return
 
-        ctk.CTkLabel(self, text='엣지 속성', font=FONT_HEADER,
-                     text_color='#5dade2').pack(anchor='w', padx=12, pady=(14,2))
-        badge = ctk.CTkFrame(self, fg_color='#1a2d4a', corner_radius=6)
-        badge.pack(fill='x', padx=10, pady=4)
+        if not getattr(edge, 'reach_params', None):
+            # 일반 연결선 패널 (reach_params 없음)
+            badge = ctk.CTkFrame(self._scroll, fg_color='#2a2a3e', corner_radius=6)
+            badge.pack(fill='x', padx=10, pady=(8, 4))
+            ctk.CTkLabel(badge, text='─ 연결선 ─',
+                         font=FONT_HEADER, text_color='#3498db').pack(anchor='w', padx=8, pady=6)
+
+            # 연결 정보 표시
+            src_name, dst_name = '?', '?'
+            if self._canvas_ref:
+                sn = self._canvas_ref.nodes.get(edge.src)
+                dn = self._canvas_ref.nodes.get(edge.dst)
+                src_name = sn.name if sn else str(edge.src)
+                dst_name = dn.name if dn else str(edge.dst)
+            ctk.CTkLabel(self._scroll,
+                         text=f'{src_name}  →  {dst_name}',
+                         font=FONT_BODY, text_color='#aaaacc',
+                         wraplength=220).pack(anchor='w', padx=12, pady=(6, 2))
+
+            ctk.CTkLabel(self._scroll,
+                         text='※ 하도추적 적용 시 팔레트에서\n   [하도추적] 버튼을 클릭하세요.',
+                         font=FONT_SMALL, text_color='gray',
+                         wraplength=220, justify='left').pack(anchor='w', padx=12, pady=(4, 8))
+
+            ctk.CTkButton(self._scroll, text='연결선 삭제',
+                          command=self._delete_plain_edge,
+                          font=FONT_BTN, fg_color='#7f3b3b', hover_color='#c0392b',
+                          height=34).pack(fill='x', padx=10, pady=(6, 4))
+            return
+
+        badge = ctk.CTkFrame(self._scroll, fg_color='#1a2d4a', corner_radius=6)
+        badge.pack(fill='x', padx=10, pady=(8, 4))
         ctk.CTkLabel(badge, text='▶─[하도추적]─▶',
                      font=FONT_HEADER, text_color='#2980b9').pack(anchor='w', padx=8, pady=6)
 
-        # Label (reach name)
-        ctk.CTkLabel(self, text='구간 이름', font=FONT_SMALL,
-                     anchor='w').pack(fill='x', padx=12, pady=(4,0))
-        ent_lbl = ctk.CTkEntry(self, font=FONT_SMALL, justify='left')
+        ctk.CTkLabel(self._scroll, text='구간 이름', font=FONT_SMALL,
+                     anchor='w').pack(fill='x', padx=12, pady=(4, 0))
+        ent_lbl = ctk.CTkEntry(self._scroll, font=FONT_SMALL, justify='left')
         ent_lbl.insert(0, edge.label or '')
-        ent_lbl.pack(fill='x', padx=10, pady=(0,2))
+        ent_lbl.pack(fill='x', padx=10, pady=(0, 2))
         self._entries['__label__'] = ent_lbl
 
         rp = edge.reach_params
-        self._section('─── 머스킹엄 매개변수 ───')
+        self._section('─── Muskingum 매개변수 ───')
         self._add_field('저류계수 K (hr)', 'K', rp.get('K', 1.0))
         self._add_slider('가중계수 X',     'X', rp.get('X', 0.20), 0.0, 0.5)
         self._add_field('NSTPS (0=자동)',  'NSTPS', rp.get('NSTPS', 0))
-        ctk.CTkLabel(self, text='※ 안정: 2Kx ≤ Δt ≤ 2K(1-x)',
-                     font=('맑은 고딕', 9), text_color='gray',
-                     wraplength=220).pack(anchor='w', padx=12, pady=2)
+        ctk.CTkLabel(self._scroll, text='※ 안정: 2Kx ≤ Δt ≤ 2K(1-x)',
+                     font=FONT_SMALL, text_color='gray',
+                     wraplength=200).pack(anchor='w', padx=12, pady=2)
 
-        ctk.CTkButton(self, text='적용', command=self._apply_edge,
+        ctk.CTkButton(self._scroll, text='적용', command=self._apply_edge,
                       font=FONT_BTN, fg_color='#27ae60', hover_color='#2ecc71',
                       height=34).pack(fill='x', padx=10, pady=(14, 4))
 
@@ -1804,6 +2243,22 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
         except ValueError as e:
             messagebox.showerror('입력 오류', str(e))
 
+    def _delete_plain_edge(self):
+        """일반 연결선 삭제 (PropertiesPanel 버튼 → canvas에 위임)."""
+        if not self._canvas_ref: return
+        canvas = self._canvas_ref
+        # _sel_edge가 설정된 경우 canvas._delete 직접 호출
+        if canvas._sel_edge and not getattr(canvas._sel_edge, 'reach_params', None):
+            canvas._push_undo()
+            eid = canvas._sel_edge.id
+            edge_label = str(eid)
+            if eid in canvas.edges:
+                del canvas.edges[eid]
+            canvas._sel_edge = None
+            if canvas._on_log: canvas._on_log(f'연결선 삭제: {edge_label}')
+            canvas.redraw()
+            self._show_empty()
+
 
 # =============================================================================
 # 수문망 편집기 창
@@ -1811,38 +2266,55 @@ class PropertiesPanel(ctk.CTkScrollableFrame):
 
 class NetworkEditorWindow(ctk.CTkToplevel):
 
-    def __init__(self, parent, on_apply):
+    def __init__(self, parent, on_apply,
+                 dt_min=60, tr_min=1440, NQ=300, baseflow=0.0, huff_pc=None):
         super().__init__(parent)
-        self.title('수문망 편집기 — 하도추적')
+        self.title('하천망 편집기 — 하도추적')
         self.geometry('1380x720')
         self.minsize(900, 500)
         self.after(50, lambda: self.state('zoomed'))
-        self._on_apply = on_apply
+        self._on_apply   = on_apply
+        self._dt_min     = dt_min
+        self._tr_min     = tr_min
+        self._NQ         = NQ
+        self._baseflow   = baseflow
+        self._huff_pc    = huff_pc or [0.0, 0.008, 0.041, 0.086, 0.154,
+                                       0.263, 0.437, 0.636, 0.833, 0.953, 1.0]
+        self._current_path   = None   # 현재 저장/로드된 .json 경로
+        self._selected_node  = None   # N 실시간 표시용
         self._set_dark()
+        # 창 수준 단축키 (캔버스 포커스 없이도 동작)
+        self.bind('<Control-z>',     lambda e: self._canvas._undo())
+        self.bind('<Control-Alt-z>', lambda e: self._canvas._redo())
+        self.bind('<Delete>',        self._window_delete)
+        self.bind('<BackSpace>',     self._window_delete)
 
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=0, minsize=280) # 팔레트
+        self.grid_columnconfigure(1, weight=1)            # 캔버스 (확장)
+        self.grid_columnconfigure(2, weight=0, minsize=280)  # 속성창 (고정 280px)
         self.grid_rowconfigure(0, weight=1)
 
-        # Left palette
+        # Left palette (고정 열)
         self._palette = PalettePanel(self, on_type_select=self._palette_clicked,
                                      corner_radius=0)
         self._palette.grid(row=0, column=0, sticky='nsew', rowspan=2)
 
-        # Center canvas area
-        center = tk.Frame(self, bg='#12121e')
-        center.grid(row=0, column=1, sticky='nsew')
-        center.grid_rowconfigure(0, weight=1)
-        center.grid_columnconfigure(0, weight=1)
+        # ── 캔버스 영역 (column=1) ──
+        left_frame = tk.Frame(self, bg='#12121e')
+        left_frame.grid(row=0, column=1, sticky='nsew', rowspan=2)
+        left_frame.grid_rowconfigure(0, weight=1)
+        left_frame.grid_columnconfigure(0, weight=1)
 
-        # Scrollbars
-        xsb = tk.Scrollbar(center, orient='horizontal')
-        ysb = tk.Scrollbar(center, orient='vertical')
+        # 캔버스 + 스크롤바
+        xsb = tk.Scrollbar(left_frame, orient='horizontal')
+        ysb = tk.Scrollbar(left_frame, orient='vertical')
         xsb.grid(row=1, column=0, sticky='ew')
         ysb.grid(row=0, column=1, sticky='ns')
 
-        self._canvas = NetworkCanvas(center,
+        self._canvas = NetworkCanvas(left_frame,
                                      on_select=self._node_selected,
                                      on_edge_select=self._edge_selected,
+                                     on_log=self._log,
                                      xscrollcommand=xsb.set,
                                      yscrollcommand=ysb.set)
         self._canvas.grid(row=0, column=0, sticky='nsew')
@@ -1850,9 +2322,9 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         xsb.configure(command=self._canvas.xview)
         ysb.configure(command=self._canvas.yview)
 
-        # Toolbar below canvas
-        toolbar = ctk.CTkFrame(self, height=42, corner_radius=0, fg_color='#1a1a2e')
-        toolbar.grid(row=1, column=1, sticky='ew')
+        # 툴바 (캔버스 하단)
+        toolbar = ctk.CTkFrame(left_frame, height=42, corner_radius=0, fg_color='#1a1a2e')
+        toolbar.grid(row=2, column=0, columnspan=2, sticky='ew')
 
         self._mode_lbl = ctk.CTkLabel(toolbar, text='모드: 선택',
                                       font=FONT_SMALL, text_color='#5dade2', width=160)
@@ -1863,28 +2335,40 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                      font=('맑은 고딕', 9), text_color='gray').pack(side='left', padx=6)
 
         for txt, cmd, col, w in [
-            ('예제 로드',         self._load_example,   '#5d6d7e', 90),
-            ('초기화',            self._clear,           '#7f3b3b', 70),
-            ('PNG로 저장',        self._save_png,        '#1a5276', 90),
-            ('다른이름으로 저장', self._save_network,    '#1a5276', 120),
-            ('적용 & 닫기',       self._apply_and_close, '#27ae60', 100),
+            ('예제 로드',         self._load_example,         '#5d6d7e', 90),
+            ('초기화',            self._clear,                '#7f3b3b', 70),
+            ('PNG로 저장',        self._save_png,             '#1a5276', 90),
+            ('닫기',              self._close,                '#4a4a4a', 60),
+            ('다른이름으로 저장', self._save_network,         '#1a5276', 120),
+            ('저장하기',          self._save_network_current, '#1a5276', 80),
+            ('불러오기',          self._load_network,         '#1a5276', 80),
+            ('적용',              self._apply_network,        '#1a6b3a', 60),
+            ('배열최적화',        self._optimize_layout,      '#2e4057', 90),
+            ('업데이트',          self._apply,                '#1a6b3a', 80),
         ]:
             ctk.CTkButton(toolbar, text=txt, command=cmd,
                           font=FONT_SMALL, height=30, width=w,
                           fg_color=col).pack(side='right', padx=4, pady=6)
 
-        self._snap_btn = ctk.CTkButton(
-            toolbar, text='스냅 ●', command=self._toggle_snap,
-            font=FONT_SMALL, height=30, width=80,
-            fg_color='#1a6b9a', hover_color='#2980b9')
-        self._snap_btn.pack(side='right', padx=4, pady=6)
-
-        # Right properties
+        # ── 속성창 (column=2, 고정 280px) ──
         self._props = PropertiesPanel(self,
-                                      redraw_cb=self._canvas.redraw,
+                                      redraw_cb=self._make_redraw_cb(),
+                                      canvas_ref=self._canvas,
                                       corner_radius=0)
         self._props.grid(row=0, column=2, sticky='nsew', rowspan=2)
-        self.grid_columnconfigure(2, minsize=280)
+
+        # 편집기 초기 로드: 캔버스가 비어있으면 Sample_Redraw.json 자동 표시
+        _ex = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Sample_Redraw.json')
+        if not self._canvas.nodes and os.path.exists(_ex):
+            try:
+                with open(_ex, 'r', encoding='utf-8') as _f:
+                    _d = json.load(_f)
+                self._canvas.load_canvas_state(_d)
+                self._current_path = _ex
+                self._props.set_filename(_ex)
+                self._refresh_dat_preview()
+            except Exception:
+                pass
 
     def _set_dark(self):
         try:
@@ -1893,8 +2377,43 @@ class NetworkEditorWindow(ctk.CTkToplevel):
             windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(c_int(1)), sizeof(c_int))
         except Exception: pass
 
+    def _window_delete(self, event):
+        """창 수준 Delete/BackSpace — Entry·Text에 포커스 없을 때만 캔버스에 위임."""
+        focused = self.focus_get()
+        if focused and focused.winfo_class() in ('Entry', 'Text'):
+            return   # 위젯이 직접 처리하도록 위임
+        self._canvas._delete(event)
+
+    def _make_redraw_cb(self):
+        """redraw 후 선택된 JUNCTION/OUTLET N값 갱신."""
+        def cb():
+            self._canvas.redraw()
+            if self._selected_node and self._selected_node.id in self._canvas.nodes:
+                self._props.show_node(self._selected_node)
+        return cb
+
     def _palette_clicked(self, ntype):
         if ntype == 'REACH_EDGE':
+            # 연결선이 선택된 상태면 즉시 하도추적으로 변환
+            sel_edge = self._canvas._sel_edge
+            if sel_edge is not None and sel_edge.id in self._canvas.edges:
+                edge = self._canvas.edges[sel_edge.id]
+                if edge.reach_params is None:
+                    self._canvas._push_undo()
+                    edge.reach_params = {'K': 1.0, 'X': 0.20, 'NSTPS': 0}
+                    if not edge.label:
+                        dst_node = self._canvas.nodes.get(edge.dst)
+                        edge.label = f'{dst_node.name}R' if dst_node else f'RC{sum(1 for e in self._canvas.edges.values() if e.reach_params):02d}'
+                    self._props.show_edge(edge)
+                    self._canvas.redraw()
+                    self._mode_lbl.configure(text='하도추적 변환 완료 ✓')
+                    self._log(f'하도추적 변환: {edge.label}')
+                    self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
+                else:
+                    self._mode_lbl.configure(text='이미 하도추적 연결선입니다')
+                    self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
+                return
+            # 연결선 미선택 시 기존 방식 (포트 클릭 연결 모드)
             self._canvas._conn_reach = True
             self._canvas.set_mode('select')
             self._mode_lbl.configure(text='모드: 하도추적 연결 (포트 클릭 → 포트 클릭)')
@@ -1910,14 +2429,13 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._mode_lbl.configure(text=f'모드: {label_map.get(ntype, ntype)}')
         self._canvas.focus_set()
 
-    def _toggle_snap(self):
-        self._canvas._snap_on = not self._canvas._snap_on
-        if self._canvas._snap_on:
-            self._snap_btn.configure(text='스냅 ●', fg_color='#1a6b9a')
-        else:
-            self._snap_btn.configure(text='스냅 ○', fg_color='#444466')
+
+    def _log(self, msg):
+        if hasattr(self._palette, 'log'):
+            self._palette.log(msg)
 
     def _node_selected(self, node):
+        self._selected_node = node
         self._props.show_node(node)
         self._mode_lbl.configure(text='모드: 선택')
         self._canvas.set_mode('select')
@@ -1932,20 +2450,150 @@ class NetworkEditorWindow(ctk.CTkToplevel):
             if not messagebox.askyesno('확인', '기존 네트워크를 지우고 예제를 로드하시겠습니까?',
                                        parent=self):
                 return
-        self._canvas.load_operations(EXAMPLE_OPERATIONS)
-        self._props.show_node(None)
+        example_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Sample_Redraw.json')
+        if not os.path.exists(example_path):
+            messagebox.showerror('오류', f'예제 파일을 찾을 수 없습니다:\n{example_path}', parent=self)
+            return
+        try:
+            with open(example_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get('format') == 'hydroset_canvas_v1':
+                self._canvas.load_canvas_state(data)
+            else:
+                ops = data if isinstance(data, list) else []
+                self._canvas.load_operations(ops)
+            self._current_path = example_path
+            self._props.set_filename(example_path)
+            self._props.show_node(None)
+            self._refresh_dat_preview()
+        except Exception as e:
+            messagebox.showerror('예제 로드 오류', str(e), parent=self)
 
     def _clear(self):
-        if messagebox.askyesno('초기화', '네트워크를 모두 초기화하시겠습니까?', parent=self):
+        if messagebox.askyesno('초기화', '네트워크를 모두 삭제 및 초기화하시겠습니까?', parent=self):
             self._canvas.clear()
             self._props.show_node(None)
 
+    @staticmethod
+    def _parse_dat_ops(path):
+        """HEC-1 .dat 파일 → operations 리스트 파싱."""
+        ops = []
+        cur_name = None
+        pending_route = None   # {'name','K','X','NSTPS'}
+        with open(path, 'r', encoding='utf-8', errors='replace') as f:
+            lines = f.readlines()
+        for raw in lines:
+            if len(raw) < 2: continue
+            card = raw[:2].upper()
+            body = raw[2:].strip()
+            if card == 'KK':
+                cur_name = body[:8].strip()
+            elif card == 'BA':
+                # BASIN — collect params across subsequent cards
+                ops.append({'type': 'BASIN', 'name': cur_name or '',
+                            'A': float(body.split()[0]) if body.split() else 0.0,
+                            'PB': 0.0, 'CN': 0.0, 'Tc': 0.0, 'R': 0.0})
+            elif card == 'PB':
+                if ops and ops[-1]['type'] == 'BASIN':
+                    ops[-1]['PB'] = float(body.split()[0]) if body.split() else 0.0
+            elif card == 'LS':
+                if ops and ops[-1]['type'] == 'BASIN':
+                    parts = body.split()
+                    if parts:
+                        ops[-1]['CN'] = float(parts[0])
+            elif card == 'UC':
+                if ops and ops[-1]['type'] == 'BASIN':
+                    parts = body.split()
+                    if len(parts) >= 2:
+                        ops[-1]['Tc'] = float(parts[0])
+                        ops[-1]['R']  = float(parts[1])
+            elif card == 'RM':
+                parts = body.split()
+                # RM  nstps  K  X  [nstps_auto]
+                K = float(parts[1]) if len(parts) > 1 else 1.0
+                X = float(parts[2]) if len(parts) > 2 else 0.2
+                pending_route = {'type': 'ROUTE', 'name': cur_name or '',
+                                 'K': K, 'X': X, 'NSTPS': 0}
+                ops.append(pending_route)
+                pending_route = None
+            elif card == 'HC':
+                N = int(body.split()[0]) if body.split() else 2
+                ops.append({'type': 'COMBINE', 'name': cur_name or '', 'N': N})
+        return ops
+
+    def _load_network(self):
+        if self._canvas.nodes:
+            if not messagebox.askyesno('확인', '기존 네트워크를 지우고 불러오시겠습니까?', parent=self):
+                return
+        paths = filedialog.askopenfilenames(
+            parent=self, title='네트워크 불러오기',
+            filetypes=[('지원 파일', '*.json *.dat'),
+                       ('JSON 파일', '*.json'),
+                       ('HEC-1 DAT', '*.dat'),
+                       ('모든 파일', '*.*')])
+        if not paths: return
+
+        json_path = next((p for p in paths if p.lower().endswith('.json')), None)
+        dat_path  = next((p for p in paths if p.lower().endswith('.dat')),  None)
+
+        try:
+            if json_path:
+                # JSON 있으면 JSON로 캔버스 상태 복원 (DAT는 미리보기만)
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and data.get('format') == 'hydroset_canvas_v1':
+                    self._canvas.load_canvas_state(data)
+                else:
+                    ops = data if isinstance(data, list) else []
+                    self._canvas.load_operations(ops)
+                self._current_path = json_path
+                self._props.set_filename(json_path)
+                if dat_path:
+                    # DAT도 있으면 미리보기에 표시
+                    dat_name = os.path.basename(dat_path)
+                    self._props.set_dat_title(f'{dat_name} 미리보기')
+                    with open(dat_path, 'r', encoding='utf-8', errors='replace') as f:
+                        self._props.update_dat_preview(f.read())
+                else:
+                    self._refresh_dat_preview()
+            elif dat_path:
+                # DAT만 선택 → 파싱 후 auto-layout
+                ops = self._parse_dat_ops(dat_path)
+                # 최종 스택 확인: 미합산 수문곡선 경고
+                _sim = []
+                for _op in ops:
+                    if _op['type'] == 'BASIN':
+                        _sim.append(_op['name'])
+                    elif _op['type'] == 'RESERVOIR':
+                        if _sim: _sim.pop()
+                        _sim.append(_op['name'])
+                    elif _op['type'] == 'COMBINE':
+                        _n = min(int(_op.get('N', 2)), len(_sim))
+                        for _ in range(_n): _sim.pop()
+                        _sim.append(_op['name'])
+                if len(_sim) > 1:
+                    messagebox.showwarning(
+                        'DAT 파싱 경고',
+                        f'DAT 파일 종료 시 {len(_sim)}개 수문곡선이 미합산 상태입니다:\n'
+                        f'  {", ".join(_sim)}\n\n'
+                        f'최종 HC {len(_sim)} + 출구 카드가 누락된 것으로 보입니다.',
+                        parent=self)
+                self._canvas.load_operations(ops)
+                self._canvas._auto_layout()
+                self._canvas.redraw()
+                self._canvas._zoom_extents()
+                self._current_path = None
+                self._props.set_filename(dat_path)
+                dat_name = os.path.basename(dat_path)
+                self._props.set_dat_title(f'{dat_name} 미리보기')
+                with open(dat_path, 'r', encoding='utf-8', errors='replace') as f:
+                    self._props.update_dat_preview(f.read())
+            self._props.show_node(None)
+        except Exception as e:
+            messagebox.showerror('불러오기 오류', str(e), parent=self)
+
     def _save_network(self):
-        ops, err = self._canvas.build_operations()
-        if err:
-            messagebox.showerror('오류', err, parent=self)
-            return
-        if not ops:
+        if not self._canvas.nodes:
             messagebox.showwarning('알림', '저장할 네트워크가 없습니다.', parent=self)
             return
         path = filedialog.asksaveasfilename(
@@ -1953,8 +2601,45 @@ class NetworkEditorWindow(ctk.CTkToplevel):
             defaultextension='.json',
             filetypes=[('JSON 파일', '*.json'), ('모든 파일', '*.*')])
         if not path: return
+        self._do_save(path)
+
+    def _save_network_current(self):
+        if not self._canvas.nodes:
+            messagebox.showwarning('알림', '저장할 네트워크가 없습니다.', parent=self)
+            return
+        if not self._current_path:
+            self._save_network()
+            return
+        self._do_save(self._current_path)
+
+    def _do_save(self, path):
+        """JSON + DAT 두 파일 동시 저장."""
+        state = {
+            'format': 'hydroset_canvas_v1',
+            'nodes': [
+                {'id': n.id, 'type': n.type, 'name': n.name,
+                 'x': n.x, 'y': n.y, 'params': n.params}
+                for n in self._canvas.nodes.values()
+            ],
+            'edges': [
+                {'id': e.id, 'src': e.src, 'dst': e.dst,
+                 'src_dir': e.src_dir, 'dst_dir': e.dst_dir,
+                 'reach_params': e.reach_params, 'label': e.label}
+                for e in self._canvas.edges.values()
+            ],
+        }
         with open(path, 'w', encoding='utf-8') as f:
-            json.dump(ops, f, ensure_ascii=False, indent=2)
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        # .dat 동시 저장
+        ops, _ = self._canvas.build_operations()
+        if ops:
+            dat_content = self._build_dat_content(ops)
+            dat_path = os.path.splitext(path)[0] + '.dat'
+            with open(dat_path, 'w', encoding='utf-8') as f:
+                f.write(dat_content)
+            self._props.update_dat_preview(dat_content)
+        self._current_path = path
+        self._props.set_filename(path)
         messagebox.showinfo('저장 완료', f'저장되었습니다:\n{path}', parent=self)
 
     def _save_png(self):
@@ -1975,7 +2660,17 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         except ImportError:
             messagebox.showerror('오류', 'Pillow(PIL) 라이브러리가 필요합니다.\npip install Pillow', parent=self)
 
-    def _apply_and_close(self):
+    def _refresh_dat_preview(self):
+        """현재 캔버스 상태로 .dat 미리보기를 즉시 갱신한다."""
+        ops, _ = self._canvas.build_operations()
+        if ops:
+            self._props.update_dat_preview(self._build_dat_content(ops))
+            if self._current_path:
+                self._props.set_dat_title(f'{os.path.basename(self._current_path)} .dat 미리보기')
+            else:
+                self._props.set_dat_title('편집 중 .dat 미리보기')
+
+    def _apply(self):
         ops, err = self._canvas.build_operations()
         if err:
             messagebox.showerror('오류', err, parent=self)
@@ -1984,7 +2679,150 @@ class NetworkEditorWindow(ctk.CTkToplevel):
             messagebox.showwarning('알림', '네트워크가 비어 있습니다.', parent=self)
             return
         self._on_apply(ops)
+        dat_content = self._build_dat_content(ops)
+        self._props.update_dat_preview(dat_content)
+        self._write_dat_file(ops)
+
+    def _close(self):
+        if self._canvas.nodes:
+            ans = messagebox.askyesnocancel('닫기', '네트워크를 저장하시겠습니까?', parent=self)
+            if ans is None:
+                return
+            if ans:
+                self._save_network_current()
         self.destroy()
+
+    def _apply_network(self):
+        """요소 관계 반영 → JSON + .dat 저장 (무확인) + 미리보기 갱신."""
+        if not self._canvas.nodes:
+            messagebox.showwarning('알림', '저장할 네트워크가 없습니다.', parent=self)
+            return
+        if not self._current_path:
+            self._save_network()   # 경로 지정 필요 시 파일 대화상자 호출
+            return
+        # JSON 저장
+        state = {
+            'format': 'hydroset_canvas_v1',
+            'nodes': [
+                {'id': n.id, 'type': n.type, 'name': n.name,
+                 'x': n.x, 'y': n.y, 'params': n.params}
+                for n in self._canvas.nodes.values()
+            ],
+            'edges': [
+                {'id': e.id, 'src': e.src, 'dst': e.dst,
+                 'src_dir': e.src_dir, 'dst_dir': e.dst_dir,
+                 'reach_params': e.reach_params, 'label': e.label}
+                for e in self._canvas.edges.values()
+            ],
+        }
+        with open(self._current_path, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+        # .dat 저장 + 미리보기 갱신
+        ops, err = self._canvas.build_operations()
+        if err:
+            messagebox.showerror('오류', err, parent=self)
+            return
+        if ops:
+            dat_content = self._build_dat_content(ops)
+            dat_path = os.path.splitext(self._current_path)[0] + '.dat'
+            with open(dat_path, 'w', encoding='utf-8') as f:
+                f.write(dat_content)
+            self._props.update_dat_preview(dat_content)
+        self._props.set_filename(self._current_path)
+        self._mode_lbl.configure(text='적용 완료 ✓')
+        self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
+
+    def _optimize_layout(self):
+        """HIERARCHY.txt 순서에 맞게 하천망 자동 배열."""
+        if not self._canvas.nodes:
+            messagebox.showwarning('알림', '배열할 네트워크가 없습니다.', parent=self)
+            return
+        self._canvas._auto_layout()
+        self._canvas.redraw()
+        # 배열 후 전체 보기 (zoom-extents)
+        self._canvas._zoom_extents()
+        self._mode_lbl.configure(text='배열최적화 완료 ✓')
+        self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
+
+    def _build_dat_content(self, ops):
+        """ops 리스트 → HEC-1 .dat 형식 문자열."""
+        outlet_name = ''
+        for op in reversed(ops):
+            if op['type'] in ('COMBINE', 'BASIN'):
+                outlet_name = op['name']
+                break
+        dt_min   = self._dt_min
+        tr_min   = self._tr_min
+        NQ       = self._NQ
+        baseflow = self._baseflow
+        huff_pc  = self._huff_pc
+
+        n_step = int(tr_min / dt_min) + 1
+        t_huff = np.linspace(0, 1, len(huff_pc))
+        t_norm = np.linspace(0, 1, n_step)
+        pc_vals = np.clip(PchipInterpolator(t_huff, np.array(huff_pc, dtype=float))(t_norm),
+                          0.0, 1.0)
+
+        lns = [
+            'ID Hydroset',
+            '*DIAGRAM',
+            'IM',
+            'IO     0       1',
+            f'IT  {int(dt_min):4d} 01JAN00    0000  {int(NQ):5d}',
+        ]
+        if outlet_name:
+            lns.append(f'VS{outlet_name:<8s}')
+        lns.append(f'VV  {baseflow:.2f}')
+        lns.append('*')
+
+        for op in ops:
+            t = op['type']; name = op['name']
+            if t == 'BASIN':
+                lns.append(f'KK{name:<8s}')
+                lns.append(f'IN  {int(dt_min):4d} 01JAN00    0000')
+                lns.append(f'BA {op["A"]:6.1f}')
+                lns.append(f'PB {op["PB"]:5.1f}')
+                fmt = [f'{v:7.3f}' for v in pc_vals]
+                for i in range(0, len(fmt), 10):
+                    lns.append('PC ' + ''.join(fmt[i:i+10]))
+                lns.append(f'LS       {op["CN"]:6.1f}')
+                lns.append(f'UC  {op["Tc"]:5.2f}  {op["R"]:5.2f}')
+                lns.append('*')
+            elif t == 'RESERVOIR':
+                A_avg = float(op.get('A_avg', 10000.0))
+                Cd    = float(op.get('Cd',    0.42))
+                L     = float(op.get('L',     10.0))
+                Hc    = float(op.get('Hc',    3.0))
+                S0    = float(op.get('S0',    0.0))
+                lns.append(f'KK{name:<8s}')
+                lns.append(f'* RESERVOIR  A_avg={A_avg:.1f}m2  Cd={Cd:.3f}  L={L:.2f}m  Hc={Hc:.2f}m  S0={S0:.1f}m3')
+                lns.append(f'* Q=Cd*L*(H-Hc)^1.5 (광정위어)  S=A_avg*H')
+                # S-A-E 표 (Modified Puls): H=Hc~Hc+5m 구간 10점
+                lns.append('SA' + ''.join(f'{A_avg/1e6:8.3f}' for _ in range(10)))
+                h_vals = [Hc + i * 0.5 for i in range(10)]
+                q_vals = [Cd * L * max(h - Hc, 0) ** 1.5 for h in h_vals]
+                s_vals = [S0 + A_avg * (h - Hc) for h in h_vals]
+                lns.append('SE' + ''.join(f'{s/1e6:8.4f}' for s in s_vals))
+                lns.append('SQ' + ''.join(f'{q:8.3f}' for q in q_vals))
+                lns.append('*')
+            elif t == 'ROUTE':
+                lns.append(f'KK{name:<8s}')
+                lns.append(f'RM     1  {op["K"]:6.2f}  {op["X"]:5.2f}')
+                lns.append('*')
+            elif t == 'COMBINE':
+                lns.append(f'KK{name:<8s}')
+                lns.append(f'HC  {int(op["N"]):4d}')
+                lns.append('*')
+        lns.append('ZZ')
+        return '\n'.join(lns)
+
+    def _write_dat_file(self, ops):
+        """현재 _current_path 기반으로 .dat 파일 저장 (경로 없으면 스킵)."""
+        if not self._current_path: return
+        dat_path = os.path.splitext(self._current_path)[0] + '.dat'
+        content = self._build_dat_content(ops)
+        with open(dat_path, 'w', encoding='utf-8') as f:
+            f.write(content)
 
     def load_operations(self, ops):
         """Load existing ops into visual editor."""
@@ -2025,7 +2863,7 @@ EXAMPLE_OPERATIONS = [
     {'type':'BASIN',   'name':'SW01',   'A':26.0,  'PB':289.8, 'CN':88.9, 'Tc':0.71, 'R':1.02},
     {'type':'ROUTE',   'name':'SW00R',  'K':0.13,  'X':0.20,   'NSTPS':0},
     {'type':'BASIN',   'name':'XSW00',  'A':2.9,   'PB':314.2, 'CN':87.7, 'Tc':0.19, 'R':0.27},
-    {'type':'COMBINE', 'name':'SW00',   'N':4},
+    {'type':'COMBINE', 'name':'SW00',   'N':2},
 ]
 
 
@@ -2120,12 +2958,12 @@ class FloodRoutingApp(ctk.CTk):
         huff_combo.pack(side='right')
         sep()
 
-        section('[ 수문망 ]')
+        section('[ 하천망 ]')
         self._net_lbl = ctk.CTkLabel(scroll, text='네트워크가 없습니다.',
                                      font=FONT_SMALL, text_color='gray', anchor='w')
         self._net_lbl.pack(fill='x', padx=12, pady=4)
 
-        ctk.CTkButton(scroll, text='수문망 편집기 열기  ✎',
+        ctk.CTkButton(scroll, text='하천망 편집기 열기  ✎',
                       command=self._open_editor,
                       font=FONT_BTN, height=38,
                       fg_color='#2c3e50', hover_color='#3d5166',
@@ -2193,8 +3031,18 @@ class FloodRoutingApp(ctk.CTk):
             self._editor.lift()
             self._editor.focus_force()
             return
-        self._editor = NetworkEditorWindow(self, on_apply=self._on_network_applied)
-        if self.operations:
+        try:
+            dt_min   = float(self._entries['DT_MIN'].get())
+            tr_min   = float(self._entries['TR_MIN'].get())
+            NQ       = int(self._entries['NQ'].get())
+            baseflow = float(self._entries['BASEFLOW'].get())
+        except Exception:
+            dt_min, tr_min, NQ, baseflow = 60.0, 1440.0, 300, 0.0
+        self._editor = NetworkEditorWindow(
+            self, on_apply=self._on_network_applied,
+            dt_min=dt_min, tr_min=tr_min, NQ=NQ,
+            baseflow=baseflow, huff_pc=list(self._pc_values))
+        if self.operations and not self._editor._canvas.nodes:
             self._editor.load_operations(self.operations)
         self._editor.after(100, lambda: (
             self._editor.lift(),
@@ -2252,7 +3100,7 @@ class FloodRoutingApp(ctk.CTk):
             self._update_net_label()
 
         if not self.operations:
-            messagebox.showwarning('알림', '수문망이 없습니다. 편집기 또는 예제 로드를 사용하세요.')
+            messagebox.showwarning('알림', '하천망이 없습니다. 편집기 또는 예제 로드를 사용하세요.')
             return
 
         try:
