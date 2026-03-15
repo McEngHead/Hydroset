@@ -2841,6 +2841,22 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         """Load existing ops into visual editor."""
         self._canvas.load_operations(ops)
 
+    def open_json_file(self, path):
+        """JSON 파일을 편집기에 직접 로드한다."""
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if isinstance(data, dict) and data.get('format') == 'hydroset_canvas_v1':
+                self._canvas.load_canvas_state(data)
+            else:
+                ops = data if isinstance(data, list) else []
+                self._canvas.load_operations(ops)
+            self._current_path = path
+            self._props.set_filename(path)
+            self._refresh_dat_preview()
+        except Exception as e:
+            self._log(f'파일 로드 오류: {e}')
+
     def get_node_count(self):
         return len(self._canvas.nodes), len(self._canvas.edges)
 
@@ -2896,6 +2912,8 @@ class FloodRoutingApp(ctk.CTk):
         self.operations = []
         self._editor    = None   # NetworkEditorWindow reference
         self._mpl_canvas = None
+        self._net_json_name = None  # 편집기에서 적용된 JSON 파일명 (basename)
+        self._net_json_path = None  # 편집기에서 적용된 JSON 전체 경로
 
         plt.rcParams['font.family']        = 'Malgun Gothic'
         plt.rcParams['axes.unicode_minus'] = False
@@ -2925,12 +2943,13 @@ class FloodRoutingApp(ctk.CTk):
 
     def _build_ui(self):
         self.grid_columnconfigure(1, weight=1)
-        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(0, weight=11)  # 스크롤 영역
+        self.grid_rowconfigure(1, weight=1)   # 실행 로그 영역
         self._build_left()
         self._build_right()
 
     def _build_left(self):
-        scroll = ctk.CTkScrollableFrame(self, width=320, corner_radius=0)
+        scroll = ctk.CTkScrollableFrame(self, width=210, corner_radius=0)
         scroll.grid(row=0, column=0, sticky='nsew')
         scroll.grid_columnconfigure(0, weight=1)
         self._left_scroll = scroll
@@ -2945,8 +2964,8 @@ class FloodRoutingApp(ctk.CTk):
         def field(label, key, default):
             row = ctk.CTkFrame(scroll, fg_color='transparent')
             row.pack(fill='x', padx=8, pady=2)
-            ctk.CTkLabel(row, text=label, font=FONT_SMALL, width=185, anchor='w').pack(side='left')
-            ent = ctk.CTkEntry(row, font=FONT_SMALL, width=100, justify='right')
+            ctk.CTkLabel(row, text=label, font=FONT_SMALL, width=120, anchor='w').pack(side='left')
+            ent = ctk.CTkEntry(row, font=FONT_SMALL, width=65, justify='right')
             ent.insert(0, default)
             ent.pack(side='right')
             self._entries[key] = ent
@@ -2954,26 +2973,14 @@ class FloodRoutingApp(ctk.CTk):
         self._entries = {}
 
         section('[ 계산 설정 ]')
-        field('계산 시간간격 Δt (분)', 'DT_MIN',   '60')
-        field('강우 지속기간 TR (분)', 'TR_MIN',   '1440')
-        field('계산 스텝 수 NQ',      'NQ',       '300')
-        field('기저유량 (m³/s)',      'BASEFLOW', '0.0')
-        sep()
-
-        section('[ 강우 시간분포 (Huff) ]')
-        hrow = ctk.CTkFrame(scroll, fg_color='transparent')
-        hrow.pack(fill='x', padx=8, pady=4)
-        ctk.CTkLabel(hrow, text='Huff 분위', font=FONT_SMALL, width=185, anchor='w').pack(side='left')
-        huff_combo = ctk.CTkComboBox(hrow, values=list(HUFF_PRESETS.keys()),
-                                     font=FONT_SMALL, width=100,
-                                     variable=self._huff_var,
-                                     command=self._on_huff_change)
-        huff_combo.pack(side='right')
+        field('계산 시간간격 Δt (분)', 'DT_MIN', '60')
+        field('강우 지속기간 TR (분)', 'TR_MIN', '1440')
+        field('계산 스텝 수 NQ',      'NQ',     '300')
         sep()
 
         section('[ 하천망 ]')
-        self._net_lbl = ctk.CTkLabel(scroll, text='네트워크가 없습니다.',
-                                     font=FONT_SMALL, text_color='gray', anchor='w')
+        self._net_lbl = ctk.CTkLabel(scroll, text='파일로드 없음',
+                                     font=FONT_SMALL, text_color='red', anchor='w')
         self._net_lbl.pack(fill='x', padx=12, pady=4)
 
         ctk.CTkButton(scroll, text='하천망 편집기 열기  ✎',
@@ -2985,9 +2992,8 @@ class FloodRoutingApp(ctk.CTk):
 
         section('[ 실행 ]')
         for label, cmd, color in [
-            ('예제 네트워크 로드', self._load_example, '#5d6d7e'),
-            ('분석 실행  ▶',      self._run,          '#27ae60'),
-            ('결과 Excel 저장',   self._save_excel,   '#2980b9'),
+            ('분석 실행  ▶', self._run,        '#27ae60'),
+            ('결과 저장',    self._save_excel, '#2980b9'),
         ]:
             ctk.CTkButton(scroll, text=label, command=cmd,
                           font=FONT_BTN, height=38,
@@ -3010,17 +3016,24 @@ class FloodRoutingApp(ctk.CTk):
                                text_color=color, anchor='w')
             lbl.pack(side='left', padx=4)
             self._result_labels[key] = lbl
-        sep()
 
-        section('[ 실행 로그 ]')
-        self._txt_log = tk.Text(scroll, height=8, font=FONT_LOG,
+        # ── 실행 로그 (스크롤 밖 row=1, 바닥까지 확장) ────────────────────────
+        log_frame = ctk.CTkFrame(self, corner_radius=0, fg_color='#1a1a1a')
+        log_frame.grid(row=1, column=0, sticky='nsew')
+        log_frame.grid_columnconfigure(0, weight=1)
+        log_frame.grid_rowconfigure(1, weight=1)
+
+        ctk.CTkLabel(log_frame, text='[ 실행 로그 ]', font=FONT_HEADER, anchor='w',
+                     text_color='#5dade2', fg_color='transparent').grid(
+                     row=0, column=0, sticky='w', padx=12, pady=(6, 2))
+        self._txt_log = tk.Text(log_frame, width=1, height=6, font=FONT_LOG,
                                 bg='#1a1a1a', fg='#cccccc',
                                 insertbackground='white', wrap='word', relief='flat')
-        self._txt_log.pack(fill='x', padx=8, pady=(0, 12))
+        self._txt_log.grid(row=1, column=0, sticky='nsew', padx=8, pady=(0, 8))
 
     def _build_right(self):
         right = ctk.CTkFrame(self, corner_radius=0, fg_color='transparent')
-        right.grid(row=0, column=1, sticky='nsew', padx=6, pady=6)
+        right.grid(row=0, column=1, rowspan=2, sticky='nsew', padx=6, pady=6)
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=3)
         right.grid_rowconfigure(1, weight=1)
@@ -3045,18 +3058,22 @@ class FloodRoutingApp(ctk.CTk):
             self._editor.focus_force()
             return
         try:
-            dt_min   = float(self._entries['DT_MIN'].get())
-            tr_min   = float(self._entries['TR_MIN'].get())
-            NQ       = int(self._entries['NQ'].get())
-            baseflow = float(self._entries['BASEFLOW'].get())
+            dt_min = float(self._entries['DT_MIN'].get())
+            tr_min = float(self._entries['TR_MIN'].get())
+            NQ     = int(float(self._entries['NQ'].get()))
         except Exception:
-            dt_min, tr_min, NQ, baseflow = 60.0, 1440.0, 300, 0.0
+            dt_min, tr_min, NQ = 60.0, 1440.0, 300
         self._editor = NetworkEditorWindow(
             self, on_apply=self._on_network_applied,
             dt_min=dt_min, tr_min=tr_min, NQ=NQ,
-            baseflow=baseflow, huff_pc=list(self._pc_values))
-        if self.operations and not self._editor._canvas.nodes:
-            self._editor.load_operations(self.operations)
+            baseflow=0.0, huff_pc=list(self._pc_values))
+        # 저장된 JSON 경로 or 예제 파일로 편집기 오픈
+        json_path = self._net_json_path
+        if not json_path:
+            json_path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     'Sample_Redraw.json')
+        if os.path.exists(json_path):
+            self._editor.open_json_file(json_path)
         self._editor.after(100, lambda: (
             self._editor.lift(),
             self._editor.focus_force()
@@ -3064,6 +3081,11 @@ class FloodRoutingApp(ctk.CTk):
 
     def _on_network_applied(self, ops):
         self.operations = ops
+        if self._editor and self._editor.winfo_exists():
+            p = getattr(self._editor, '_current_path', None)
+            if p:
+                self._net_json_path = p
+                self._net_json_name = os.path.basename(p)
         self._update_net_label()
         n = len(ops)
         bc = sum(1 for o in ops if o['type'] == 'BASIN')
@@ -3071,15 +3093,14 @@ class FloodRoutingApp(ctk.CTk):
         self._log(f'네트워크 적용: {n}개 조작 (소유역 {bc}개, 추적 {rc}구간)')
 
     def _update_net_label(self):
-        n = len(self.operations)
-        if n == 0:
-            self._net_lbl.configure(text='네트워크가 없습니다.', text_color='gray')
-        else:
-            bc = sum(1 for o in self.operations if o['type'] == 'BASIN')
-            rc = sum(1 for o in self.operations if o['type'] == 'ROUTE')
+        if self._net_json_name:
             self._net_lbl.configure(
-                text=f'{n}개 조작 ({bc}개 소유역, {rc}개 추적구간)',
+                text=self._net_json_name,
                 text_color='#5dade2')
+        else:
+            self._net_lbl.configure(
+                text='파일로드 없음',
+                text_color='red')
 
     # ── 예제 로드 ─────────────────────────────────────────────────────────────
 
@@ -3087,10 +3108,9 @@ class FloodRoutingApp(ctk.CTk):
         if self.operations:
             if not messagebox.askyesno('확인', '기존 조작을 지우고 예제를 로드하시겠습니까?'):
                 return
-        self._set_entry('DT_MIN',   '60')
-        self._set_entry('TR_MIN',   '1440')
-        self._set_entry('NQ',       '300')
-        self._set_entry('BASEFLOW', '2.11')
+        self._set_entry('DT_MIN', '60')
+        self._set_entry('TR_MIN', '1440')
+        self._set_entry('NQ',     '300')
         self._huff_var.set('3분위')
         self._pc_values = list(HUFF_PRESETS['3분위'])
         self.operations = copy.deepcopy(EXAMPLE_OPERATIONS)
@@ -3117,10 +3137,9 @@ class FloodRoutingApp(ctk.CTk):
             return
 
         try:
-            dt_min   = float(self._entries['DT_MIN'].get())
-            tr_min   = float(self._entries['TR_MIN'].get())
-            NQ       = int(  self._entries['NQ'].get())
-            baseflow = float(self._entries['BASEFLOW'].get())
+            dt_min = float(self._entries['DT_MIN'].get())
+            tr_min = float(self._entries['TR_MIN'].get())
+            NQ     = int(float(self._entries['NQ'].get()))
         except ValueError as e:
             messagebox.showerror('입력 오류', str(e))
             return
@@ -3129,7 +3148,7 @@ class FloodRoutingApp(ctk.CTk):
 
         try:
             results = self.processor.run(
-                self.operations, dt_min, NQ, tr_min, self._pc_values, baseflow)
+                self.operations, dt_min, NQ, tr_min, self._pc_values, 0.0)
         except Exception:
             self._log(f'오류: {traceback.format_exc()}')
             messagebox.showerror('계산 오류', traceback.format_exc()[:300])
@@ -3287,7 +3306,7 @@ class FloodRoutingApp(ctk.CTk):
                     ws1.cell(row=i, column=cs+j, value=v)
 
         dt_min = float(self._entries['DT_MIN'].get())
-        NQ     = int(  self._entries['NQ'].get())
+        NQ     = int(float(self._entries['NQ'].get()))
         dt_hr  = dt_min / 60.0
 
         for name, rdata in self.processor.results.items():
@@ -3329,7 +3348,7 @@ class FloodRoutingApp(ctk.CTk):
             with open(self.config_file, encoding='utf-8') as f:
                 cfg = json.load(f)
             s6 = cfg.get('step6', {})
-            for key in ('DT_MIN', 'TR_MIN', 'NQ', 'BASEFLOW'):
+            for key in ('DT_MIN', 'TR_MIN', 'NQ'):
                 if key in s6: self._set_entry(key, str(s6[key]))
             if 'huff' in s6 and s6['huff'] in HUFF_PRESETS:
                 self._huff_var.set(s6['huff'])
@@ -3349,7 +3368,7 @@ class FloodRoutingApp(ctk.CTk):
             except Exception: pass
 
             s6 = {}
-            for key in ('DT_MIN', 'TR_MIN', 'NQ', 'BASEFLOW'):
+            for key in ('DT_MIN', 'TR_MIN', 'NQ'):
                 try: s6[key] = float(self._entries[key].get())
                 except Exception: pass
             s6['huff']       = self._huff_var.get()
