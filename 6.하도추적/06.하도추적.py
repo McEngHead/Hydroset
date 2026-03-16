@@ -12,28 +12,68 @@ Muskingum 방법 (KWRA 수문학 CH08 기준):
 """
 
 import os, sys, json, traceback, warnings, copy, math
+import threading
+import urllib.request, urllib.error
 import numpy as np
 from datetime import datetime
 from ctypes import windll, byref, sizeof, c_int
-from scipy.interpolate import PchipInterpolator
 
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox, filedialog, simpledialog
 
-import matplotlib
-matplotlib.use('TkAgg')
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-
-from openpyxl import Workbook
-from openpyxl.styles import Font, PatternFill, Alignment
-from openpyxl.utils import get_column_letter
-
 warnings.filterwarnings("ignore", category=RuntimeWarning)
+
+# ── 지연 import (scipy, matplotlib, openpyxl) ────────────────────────────
+# 실행/엑셀 저장 시점에 최초 1회만 import → 앱 시작 ~1초 단축
+_lazy = {}
+
+def _ensure_scipy():
+    if 'PchipInterpolator' not in _lazy:
+        from scipy.interpolate import PchipInterpolator
+        _lazy['PchipInterpolator'] = PchipInterpolator
+    return _lazy['PchipInterpolator']
+
+def _ensure_mpl():
+    if 'plt' not in _lazy:
+        import matplotlib
+        matplotlib.use('TkAgg')
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+        _lazy['plt'] = plt
+        _lazy['FigureCanvasTkAgg'] = FigureCanvasTkAgg
+    return _lazy['plt'], _lazy['FigureCanvasTkAgg']
+
+def _ensure_openpyxl():
+    if 'Workbook' not in _lazy:
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+        from openpyxl.utils import get_column_letter
+        _lazy['Workbook'] = Workbook
+        _lazy['Font'] = Font
+        _lazy['PatternFill'] = PatternFill
+        _lazy['Alignment'] = Alignment
+        _lazy['get_column_letter'] = get_column_letter
+    return _lazy
 
 ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("blue")
+
+OLLAMA_BASE = 'http://localhost:11434'
+
+# ── Google Gemini API 설정 ──────────────────────────────────────────────────
+_gemini_key_file = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                '..', 'GEMINI_API_KEY.json')
+try:
+    with open(_gemini_key_file, 'r', encoding='utf-8') as _f:
+        GEMINI_API_KEY = json.load(_f)['GEMINI_API_KEY']
+except Exception:
+    GEMINI_API_KEY = ''
+GEMINI_MODELS = [
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+]
+# ────────────────────────────────────────────────────────────────────────────
 
 FONT_TITLE  = ("맑은 고딕", 18, "bold")
 FONT_HEADER = ("맑은 고딕", 12, "bold")
@@ -168,7 +208,7 @@ class ClarkEngine:
         n_step = int(tr_min / dt_min) + 1
         t_huff = np.linspace(0.0, 1.0, len(huff_pc))
         t_norm = np.linspace(0.0, 1.0, n_step)
-        pc_interp = np.clip(PchipInterpolator(t_huff, np.array(huff_pc, dtype=float))(t_norm), 0.0, 1.0)
+        pc_interp = np.clip(_ensure_scipy()(t_huff, np.array(huff_pc, dtype=float))(t_norm), 0.0, 1.0)
         cum_rain = pc_interp * total_precip
         S = (25400.0 / cn) - 254.0
         Ia = 0.2 * S
@@ -572,7 +612,7 @@ class NetworkCanvas(tk.Canvas):
         sel = (self._sel_node and self._sel_node.id == node.id) or (node.id in self._sel_nodes)
         if sel:
             outline = '#f39c12'
-        lw = max(1, int((3 if sel else 2) * self._zoom))
+        lw = max(1, int((2 if sel else 1) * self._zoom))
 
         z  = self._zoom
         x, y = node.x * z, node.y * z
@@ -1866,11 +1906,11 @@ class PalettePanel(ctk.CTkFrame):
         mini = tk.Canvas(frame, width=148, height=48, bg='#1a1a2e', highlightthickness=0)
         mini.pack(pady=4)
         cy = 24
-        mini.create_line(4, cy, 44, cy, fill='#2980b9', width=2)
+        mini.create_line(4, cy, 44, cy, fill='#2980b9', width=1)
         off = 6
         pts = [44+off, cy-12, 104+off, cy-12, 104-off, cy+12, 44-off, cy+12]
-        mini.create_polygon(*pts, fill='#1a2d4a', outline='#2980b9', width=2)
-        mini.create_line(104, cy, 140, cy, fill='#2980b9', width=2,
+        mini.create_polygon(*pts, fill='#1a2d4a', outline='#2980b9', width=1)
+        mini.create_line(104, cy, 140, cy, fill='#2980b9', width=1,
                          arrow=tk.LAST, arrowshape=(7, 9, 3))
         mini.create_text(74, cy, text='하도추적', fill='white',
                          font=('맑은 고딕', 9, 'bold'))
@@ -1887,17 +1927,17 @@ class PalettePanel(ctk.CTkFrame):
         cx, cy = 74, 24
         fill = style['fill']; out = style['outline']
         if ntype == 'SUBBASIN':
-            self._round_rect_mini(c, cx-52, cy-17, cx+52, cy+17, 8, fill=fill, outline=out, width=2)
+            self._round_rect_mini(c, cx-52, cy-17, cx+52, cy+17, 8, fill=fill, outline=out, width=1)
         elif ntype == 'RESERVOIR':
             pts = []
             for i in range(6):
                 ang = math.pi / 2 + i * math.pi / 3
                 pts.extend([cx + 26 * math.cos(ang), cy + 20 * math.sin(ang)])
-            c.create_polygon(*pts, fill=fill, outline=out, width=2)
+            c.create_polygon(*pts, fill=fill, outline=out, width=1)
         elif ntype == 'JUNCTION':
-            c.create_oval(cx-22, cy-22, cx+22, cy+22, fill=fill, outline=out, width=2)
+            c.create_oval(cx-22, cy-22, cx+22, cy+22, fill=fill, outline=out, width=1)
         elif ntype == 'OUTLET':
-            c.create_rectangle(cx-24, cy-17, cx+24, cy+17, fill=fill, outline=out, width=2)
+            c.create_rectangle(cx-24, cy-17, cx+24, cy+17, fill=fill, outline=out, width=1)
         c.create_text(cx, cy, text=style['label'], fill='white',
                       font=('맑은 고딕', 9, 'bold'))
 
@@ -2734,6 +2774,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
             messagebox.showerror('오류', err, parent=self)
             return
         if ops:
+            self._on_apply(ops)
             dat_content = self._build_dat_content(ops)
             dat_path = os.path.splitext(self._current_path)[0] + '.dat'
             with open(dat_path, 'w', encoding='utf-8') as f:
@@ -2757,8 +2798,13 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         self._mode_lbl.configure(text='배열최적화 완료 ✓')
         self.after(2000, lambda: self._mode_lbl.configure(text='모드: 선택'))
 
+    @staticmethod
+    def _strip_lead0(s):
+        """HEC-1 스타일: ' 0.' → '  .' (소수점 앞 불필요한 0 제거)"""
+        return s.replace(' 0.', '  .')
+
     def _build_dat_content(self, ops):
-        """ops 리스트 → HEC-1 .dat 형식 문자열."""
+        """ops 리스트 → HEC-1 .dat 형식 문자열 (8자 필드 기준)."""
         outlet_name = ''
         for op in reversed(ops):
             if op['type'] in ('COMBINE', 'BASIN'):
@@ -2769,37 +2815,38 @@ class NetworkEditorWindow(ctk.CTkToplevel):
         NQ       = self._NQ
         baseflow = self._baseflow
         huff_pc  = self._huff_pc
+        sl       = self._strip_lead0
 
         n_step = int(tr_min / dt_min) + 1
         t_huff = np.linspace(0, 1, len(huff_pc))
         t_norm = np.linspace(0, 1, n_step)
-        pc_vals = np.clip(PchipInterpolator(t_huff, np.array(huff_pc, dtype=float))(t_norm),
+        pc_vals = np.clip(_ensure_scipy()(t_huff, np.array(huff_pc, dtype=float))(t_norm),
                           0.0, 1.0)
 
         lns = [
             'ID Hydroset',
             '*DIAGRAM',
             'IM',
-            'IO     0       1',
-            f'IT  {int(dt_min):4d} 01JAN00    0000  {int(NQ):5d}',
+            f'IO{0:8d}{1:8d}',
+            f'IT{int(dt_min):8d}{"01JAN00":>8s}{"0000":>8s}{int(NQ):8d}',
         ]
         if outlet_name:
-            lns.append(f'VS{outlet_name:<8s}')
-        lns.append(f'VV  {baseflow:.2f}')
+            lns.append(f'VS  {outlet_name}')
+        lns.append('VV' + sl(f'{baseflow:8.2f}'))
         lns.append('*')
 
         for op in ops:
             t = op['type']; name = op['name']
             if t == 'BASIN':
-                lns.append(f'KK{name:<8s}')
-                lns.append(f'IN  {int(dt_min):4d} 01JAN00    0000')
-                lns.append(f'BA {op["A"]:6.1f}')
-                lns.append(f'PB {op["PB"]:5.1f}')
-                fmt = [f'{v:7.3f}' for v in pc_vals]
+                lns.append(f'KK{name}')
+                lns.append(f'IN{int(dt_min):8d}{"01JAN00":>8s}{"0000":>8s}')
+                lns.append('BA' + sl(f'{op["A"]:8.1f}'))
+                lns.append('PB' + sl(f'{op["PB"]:8.1f}'))
+                fmt = [sl(f'{v:8.3f}') for v in pc_vals]
                 for i in range(0, len(fmt), 10):
-                    lns.append('PC ' + ''.join(fmt[i:i+10]))
-                lns.append(f'LS       {op["CN"]:6.1f}')
-                lns.append(f'UC  {op["Tc"]:5.2f}  {op["R"]:5.2f}')
+                    lns.append('PC' + ''.join(fmt[i:i+10]))
+                lns.append('LS' + '        ' + sl(f'{op["CN"]:8.1f}'))
+                lns.append('UC' + sl(f'{op["Tc"]:8.2f}') + sl(f'{op["R"]:8.2f}'))
                 lns.append('*')
             elif t == 'RESERVOIR':
                 A_avg = float(op.get('A_avg', 10000.0))
@@ -2807,7 +2854,7 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                 L     = float(op.get('L',     10.0))
                 Hc    = float(op.get('Hc',    3.0))
                 S0    = float(op.get('S0',    0.0))
-                lns.append(f'KK{name:<8s}')
+                lns.append(f'KK{name}')
                 lns.append(f'* RESERVOIR  A_avg={A_avg:.1f}m2  Cd={Cd:.3f}  L={L:.2f}m  Hc={Hc:.2f}m  S0={S0:.1f}m3')
                 lns.append(f'* Q=Cd*L*(H-Hc)^1.5 (광정위어)  S=A_avg*H')
                 # S-A-E 표 (Modified Puls): H=Hc~Hc+5m 구간 10점
@@ -2819,12 +2866,13 @@ class NetworkEditorWindow(ctk.CTkToplevel):
                 lns.append('SQ' + ''.join(f'{q:8.3f}' for q in q_vals))
                 lns.append('*')
             elif t == 'ROUTE':
-                lns.append(f'KK{name:<8s}')
-                lns.append(f'RM     1  {op["K"]:6.2f}  {op["X"]:5.2f}')
+                nstps = max(1, int(op.get('NSTPS', 0) or 1))
+                lns.append(f'KK{name}')
+                lns.append('RM' + f'{nstps:8d}' + sl(f'{op["K"]:8.2f}') + sl(f'{op["X"]:8.2f}'))
                 lns.append('*')
             elif t == 'COMBINE':
-                lns.append(f'KK{name:<8s}')
-                lns.append(f'HC  {int(op["N"]):4d}')
+                lns.append(f'KK{name}')
+                lns.append(f'HC{int(op["N"]):8d}')
                 lns.append('*')
         lns.append('ZZ')
         return '\n'.join(lns)
@@ -2915,13 +2963,13 @@ class FloodRoutingApp(ctk.CTk):
         self._net_json_name = None  # 편집기에서 적용된 JSON 파일명 (basename)
         self._net_json_path = None  # 편집기에서 적용된 JSON 전체 경로
 
-        plt.rcParams['font.family']        = 'Malgun Gothic'
-        plt.rcParams['axes.unicode_minus'] = False
+        # matplotlib rcParams는 그래프 생성 시 지연 설정
 
         self.title(f'하도홍수추적 (6단계) — [{self.project_name}]')
         self.geometry('1280x800')
         self.minsize(900, 600)
         self._set_dark()
+        self.tk.eval('proc bgerror {msg} {}')
         self.protocol('WM_DELETE_WINDOW', self._on_close)
 
         self._huff_var  = ctk.StringVar(value='3분위')
@@ -2929,6 +2977,7 @@ class FloodRoutingApp(ctk.CTk):
 
         self._build_ui()
         self._load_config()
+        pass  # init end
 
     def _set_dark(self):
         try:
@@ -2942,6 +2991,7 @@ class FloodRoutingApp(ctk.CTk):
     # ── UI 구성 ──────────────────────────────────────────────────────────────
 
     def _build_ui(self):
+        self.grid_columnconfigure(0, weight=0, minsize=280)  # 좌측 패널 고정 폭
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=11)  # 스크롤 영역
         self.grid_rowconfigure(1, weight=1)   # 실행 로그 영역
@@ -2949,7 +2999,7 @@ class FloodRoutingApp(ctk.CTk):
         self._build_right()
 
     def _build_left(self):
-        scroll = ctk.CTkScrollableFrame(self, width=210, corner_radius=0)
+        scroll = ctk.CTkScrollableFrame(self, width=280, corner_radius=0)
         scroll.grid(row=0, column=0, sticky='nsew')
         scroll.grid_columnconfigure(0, weight=1)
         self._left_scroll = scroll
@@ -2983,11 +3033,20 @@ class FloodRoutingApp(ctk.CTk):
                                      font=FONT_SMALL, text_color='red', anchor='w')
         self._net_lbl.pack(fill='x', padx=12, pady=4)
 
-        ctk.CTkButton(scroll, text='하천망 편집기 열기  ✎',
+        _net_row = tk.Frame(scroll, bg='#2b2b2b')
+        _net_row.pack(fill='x', padx=8, pady=3)
+        _net_row.grid_columnconfigure(0, weight=3)
+        _net_row.grid_columnconfigure(1, weight=1)
+        ctk.CTkButton(_net_row, text='하천망편집기',
                       command=self._open_editor,
                       font=FONT_BTN, height=38,
                       fg_color='#2c3e50', hover_color='#3d5166',
-                      ).pack(fill='x', padx=8, pady=3)
+                      ).grid(row=0, column=0, sticky='ew', padx=(0, 2))
+        ctk.CTkButton(_net_row, text='하천망 검토',
+                      command=self._open_review,
+                      font=FONT_BTN, height=38,
+                      fg_color='#6c3483', hover_color='#7d3c98',
+                      ).grid(row=0, column=1, sticky='ew', padx=(2, 0))
         sep()
 
         section('[ 실행 ]')
@@ -3078,6 +3137,1537 @@ class FloodRoutingApp(ctk.CTk):
             self._editor.lift(),
             self._editor.focus_force()
         ) if self._editor and self._editor.winfo_exists() else None)
+
+    # ── 하천망 검토 (Ollama) ──────────────────────────────────────────────────
+
+    def _list_ollama_models(self):
+        """Ollama에 설치된 모델 목록 반환."""
+        try:
+            req = urllib.request.Request(
+                f'{OLLAMA_BASE}/api/tags',
+                headers={'Content-Type': 'application/json'})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read())
+                return [m['name'] for m in data.get('models', [])]
+        except Exception:
+            return []
+
+    def _open_review(self):
+        """모델 선택 (Gemini API + Ollama 로컬) 후 하천망 표준지침 검토 실행."""
+        if not self.operations:
+            messagebox.showwarning('알림', '하천망 데이터가 없습니다.\n편집기에서 네트워크를 먼저 로드하세요.')
+            return
+
+        # ── 모델 목록 구성: 자동분석 + Gemini API + Ollama 로컬 ──
+        auto_models = ['[자동분석] 표준지침 4.3.3']
+        gemini_models = [f'[Gemini] {m}' for m in GEMINI_MODELS] if GEMINI_API_KEY else []
+        ollama_models = [f'[Ollama] {m}' for m in self._list_ollama_models()]
+        models = auto_models + gemini_models + ollama_models
+
+        if not models:
+            messagebox.showwarning(
+                '모델 없음',
+                'Gemini API 키가 없고, Ollama 서버에도 연결할 수 없습니다.\n\n'
+                '• Gemini: GEMINI_API_KEY.json 파일을 확인하세요.\n'
+                '• Ollama: ollama pull qwen3:8b 로 모델을 설치하세요.'
+            )
+            return
+
+        # 기본값: 자동분석 (models[0])
+        default_model = models[0]
+
+        # 모델 선택 다이얼로그
+        dlg = ctk.CTkToplevel(self)
+        dlg.title('모델 선택 — 하천망 검토')
+        dlg.geometry('460x230')
+        dlg.resizable(False, False)
+        dlg.grab_set()
+        try:
+            hwnd = windll.user32.GetParent(dlg.winfo_id())
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(c_int(1)), sizeof(c_int))
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(c_int(1)), sizeof(c_int))
+        except Exception:
+            pass
+
+        ctk.CTkLabel(dlg, text='LLM 모델 선택', font=FONT_HEADER).pack(pady=(16, 4))
+        model_var = ctk.StringVar(value=default_model)
+        ctk.CTkComboBox(dlg, values=models, variable=model_var, width=380).pack(pady=6)
+
+        think_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(dlg, text='추론 과정 출력',
+                        variable=think_var, font=FONT_SMALL,
+                        checkbox_width=16, checkbox_height=16).pack(pady=(8, 2))
+
+        selected = [None]
+
+        def _ok():
+            chosen = model_var.get()
+            selected[0] = (chosen, think_var.get())
+            try:
+                cfg = {}
+                try:
+                    with open(self.config_file, encoding='utf-8') as f:
+                        cfg = json.load(f)
+                except Exception:
+                    pass
+                cfg['review_model'] = chosen
+                with open(self.config_file, 'w', encoding='utf-8') as f:
+                    json.dump(cfg, f, ensure_ascii=False, indent=2)
+            except Exception:
+                pass
+            dlg.destroy()
+
+        def _cancel():
+            dlg.destroy()
+
+        btn_row = ctk.CTkFrame(dlg, fg_color='transparent')
+        btn_row.pack(pady=10)
+        ctk.CTkButton(btn_row, text='검토 시작', command=_ok, width=120,
+                      fg_color='#6c3483', hover_color='#7d3c98').pack(side='left', padx=6)
+        ctk.CTkButton(btn_row, text='취소', command=_cancel, width=80,
+                      fg_color='#555', hover_color='#666').pack(side='left', padx=6)
+
+        dlg.wait_window()
+        if selected[0] is None:
+            return
+
+        chosen_model, think_mode = selected[0]
+        if chosen_model.startswith('[자동분석]'):
+            self._run_guideline_checker()
+        elif chosen_model.startswith('[Gemini] '):
+            gemini_id = chosen_model.replace('[Gemini] ', '')
+            self._run_gemini_review(gemini_id, think_mode)
+        elif chosen_model.startswith('[Ollama] '):
+            ollama_id = chosen_model.replace('[Ollama] ', '')
+            self._run_ollama_review(ollama_id, think_mode)
+        else:
+            self._run_ollama_review(chosen_model, think_mode)
+
+    def _run_gemini_review(self, model_id, think_mode=True):
+        """Google Gemini API 스트리밍 요청 → 송신/추론/수신 전체 구분 출력."""
+        win = ctk.CTkToplevel(self)
+        win.title(f'하천망 검토 — {model_id}')
+        win.geometry('980x800')
+        try:
+            hwnd = windll.user32.GetParent(win.winfo_id())
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(c_int(1)), sizeof(c_int))
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(c_int(1)), sizeof(c_int))
+        except Exception:
+            pass
+
+        top_bar = ctk.CTkFrame(win, fg_color='transparent')
+        top_bar.pack(fill='x', padx=10, pady=(8, 2))
+        status_lbl = ctk.CTkLabel(top_bar, text=f'  [Gemini {model_id}]  대기 중...',
+                                   font=FONT_SMALL, text_color='#f39c12', anchor='w')
+        status_lbl.pack(side='left', fill='x', expand=True)
+
+        stop_event  = threading.Event()
+        resp_holder = [None]
+
+        def _copy():
+            win.clipboard_clear()
+            win.clipboard_append(txt.get('1.0', 'end'))
+
+        def _stop():
+            stop_event.set()
+            if resp_holder[0] is not None:
+                try: resp_holder[0].close()
+                except Exception: pass
+            status_lbl.configure(text=f'  [Gemini {model_id}]  중단됨', text_color='#e74c3c')
+            stop_btn.configure(state='disabled', fg_color='#333')
+
+        stop_btn = ctk.CTkButton(top_bar, text='■ 중단', command=_stop, width=70, height=26,
+                                 font=FONT_SMALL, fg_color='#922b21', hover_color='#a93226')
+        stop_btn.pack(side='right', padx=(0, 4))
+        ctk.CTkButton(top_bar, text='전체 복사', command=_copy, width=80, height=26,
+                      font=FONT_SMALL, fg_color='#444', hover_color='#555').pack(side='right')
+
+        txt_frame = ctk.CTkFrame(win, fg_color='#0d0d0d')
+        txt_frame.pack(fill='both', expand=True, padx=8, pady=(2, 8))
+        txt = tk.Text(txt_frame, wrap='word', bg='#0d0d0d', fg='#e8e8e8',
+                      font=('맑은 고딕', 10), relief='flat', padx=14, pady=10,
+                      insertbackground='white', selectbackground='#444')
+        sb = ctk.CTkScrollbar(txt_frame, command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        txt.pack(fill='both', expand=True)
+
+        # 색상 태그 정의
+        txt.tag_config('hdr_send',   foreground='#3498db', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('prompt',     foreground='#85c1e9', font=('맑은 고딕',  9))
+        txt.tag_config('hdr_think',  foreground='#f39c12', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('thinking',   foreground='#e59866', font=('맑은 고딕',  9, 'italic'))
+        txt.tag_config('hdr_recv',   foreground='#2ecc71', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('response',   foreground='#e8e8e8', font=('맑은 고딕', 10))
+        txt.tag_config('diagram',    foreground='#a8d8a8', font=('Consolas',   10))
+        txt.tag_config('sep',        foreground='#444444')
+
+        _DIAG_CHARS = set('╔╗╚╝║═╠╣╦╩╬─│┌┐└┘├┤┬┴┼▶◀▲▼⚠✓')
+        _DIAG_STARTS = ('[', '(', '──', '  [', '  (', '  ╔', '  ╚', '  ║')
+
+        def _is_diagram_line(line):
+            if any(c in line for c in _DIAG_CHARS):
+                return True
+            stripped = line.strip()
+            return any(stripped.startswith(s.strip()) for s in _DIAG_STARTS
+                       if s.strip() in ('[', '(', '──'))
+
+        def _ins(text, tag=''):
+            if tag == 'response' and '\n' in text:
+                lines = text.split('\n')
+                for i, line in enumerate(lines):
+                    seg = line + ('\n' if i < len(lines) - 1 else '')
+                    t = 'diagram' if _is_diagram_line(line) else 'response'
+                    txt.insert('end', seg, t)
+            elif tag:
+                txt.insert('end', text, tag)
+            else:
+                txt.insert('end', text)
+            txt.see('end')
+
+        def _sep(char='─', n=80):
+            _ins(char * n + '\n', 'sep')
+
+        base_prompt = self._build_review_prompt()
+
+        if think_mode:
+            think_instruction = (
+                "Before responding, follow this format strictly:\n"
+                "1. Open a <추론> tag and write your full reasoning process (any language is fine).\n"
+                "2. Close with </추론>.\n"
+                "3. Then write the final report **in Korean**.\n\n"
+                "Example format:\n"
+                "<추론>\n"
+                "Total area is X km², which exceeds 250 km². Therefore ...\n"
+                "</추론>\n\n"
+                "## 1. 적합성 판정표\n...\n\n"
+            )
+            prompt = think_instruction + base_prompt
+        else:
+            prompt = base_prompt
+
+        # ── 송신 프롬프트 출력 ──
+        _ins('▶ 송신 프롬프트\n', 'hdr_send')
+        _sep()
+        _ins(prompt + '\n', 'prompt')
+        _sep()
+        _ins('\n')
+
+        # 추론 태그 파싱용 (Ollama와 동일)
+        THINK_TAG_PAIRS = [
+            ('<추론>',    '</추론>'),
+            ('<think>',   '</think>'),
+            ('<thought>', '</thought>'),
+            ('<thinking>','</thinking>'),
+        ]
+        MAX_OPEN_LEN = max(len(o) for o, _ in THINK_TAG_PAIRS)
+
+        def _find_open_tag(text):
+            best = None
+            for o, c in THINK_TAG_PAIRS:
+                i = text.find(o)
+                if i != -1:
+                    if best is None or i < best[0]:
+                        best = (i, o, c)
+            return best
+
+        def _stream():
+            try:
+                win.after(0, lambda: status_lbl.configure(
+                    text=f'  [Gemini {model_id}]  전송 중...', text_color='#f39c12'))
+
+                # Gemini REST API — streamGenerateContent (SSE)
+                api_url = (
+                    f"https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{model_id}:streamGenerateContent?alt=sse&key={GEMINI_API_KEY}"
+                )
+                body = json.dumps({
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "temperature": 0.7,
+                        "maxOutputTokens": 16384,
+                    }
+                }).encode('utf-8')
+                req = urllib.request.Request(
+                    api_url, data=body,
+                    headers={'Content-Type': 'application/json'})
+
+                think_started = False
+                resp_started  = False
+                in_think      = False
+                close_tag     = ''
+                buf           = ''
+                total_chars   = 0
+
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    resp_holder[0] = resp
+                    for raw_line in resp:
+                        if stop_event.is_set():
+                            break
+                        raw_line = raw_line.decode('utf-8', errors='replace').strip()
+                        if not raw_line:
+                            continue
+                        # SSE 형식: "data: {...}"
+                        if not raw_line.startswith('data: '):
+                            continue
+                        json_str = raw_line[6:]
+                        try:
+                            obj = json.loads(json_str)
+                        except Exception:
+                            continue
+
+                        # Gemini 응답 구조: candidates[0].content.parts[0].text
+                        candidates = obj.get('candidates', [])
+                        if not candidates:
+                            continue
+                        parts = candidates[0].get('content', {}).get('parts', [])
+                        chunk = ''
+                        for part in parts:
+                            chunk += part.get('text', '')
+                        if not chunk:
+                            continue
+
+                        total_chars += len(chunk)
+
+                        # ── 추론 태그 파싱 (Ollama 로직 재사용) ──
+                        buf += chunk
+                        while buf:
+                            if in_think:
+                                idx = buf.find(close_tag)
+                                if idx == -1:
+                                    safe = len(buf) - len(close_tag) + 1
+                                    if safe <= 0:
+                                        break
+                                    emit = buf[:safe]
+                                    buf  = buf[safe:]
+                                    win.after(0, lambda c=emit: _ins(c, 'thinking'))
+                                else:
+                                    emit = buf[:idx]
+                                    buf  = buf[idx + len(close_tag):]
+                                    if emit:
+                                        win.after(0, lambda c=emit: _ins(c, 'thinking'))
+                                    in_think  = False
+                                    close_tag = ''
+                                    if not resp_started:
+                                        resp_started = True
+                                        win.after(0, lambda: (
+                                            _ins('\n'),
+                                            _ins('◆ 수신 응답\n', 'hdr_recv'),
+                                            _sep()))
+                            else:
+                                found = _find_open_tag(buf)
+                                if found is None:
+                                    safe = len(buf) - MAX_OPEN_LEN + 1
+                                    if safe <= 0:
+                                        break
+                                    emit = buf[:safe]
+                                    buf  = buf[safe:]
+                                    if not resp_started:
+                                        resp_started = True
+                                        win.after(0, lambda: (
+                                            _ins('◆ 수신 응답\n', 'hdr_recv'),
+                                            _sep()))
+                                    win.after(0, lambda c=emit: _ins(c, 'response'))
+                                else:
+                                    idx, open_t, close_t = found
+                                    pre = buf[:idx]
+                                    buf = buf[idx + len(open_t):]
+                                    if pre.strip():
+                                        if not resp_started:
+                                            resp_started = True
+                                            win.after(0, lambda: (
+                                                _ins('◆ 수신 응답\n', 'hdr_recv'),
+                                                _sep()))
+                                        win.after(0, lambda c=pre: _ins(c, 'response'))
+                                    in_think  = True
+                                    close_tag = close_t
+                                    if not think_started:
+                                        think_started = True
+                                        label = f'◆ 추론 과정  ({open_t} 태그)\n'
+                                        win.after(0, lambda lb=label: (
+                                            _ins(lb, 'hdr_think'),
+                                            _sep('·')))
+
+                # ── 버퍼 잔여 flush ──
+                if buf.strip():
+                    tag = 'thinking' if in_think else 'response'
+                    if not resp_started and tag == 'response':
+                        resp_started = True
+                        win.after(0, lambda: (
+                            _ins('◆ 수신 응답\n', 'hdr_recv'),
+                            _sep()))
+                    win.after(0, lambda c=buf, t=tag: _ins(c, t))
+
+                if not stop_event.is_set():
+                    stats = f"총 {total_chars:,}자 수신"
+                    win.after(0, lambda s=stats: (
+                        _ins('\n'),
+                        _sep(),
+                        _ins(f'◆ 완료  {s}\n', 'hdr_recv'),
+                        status_lbl.configure(
+                            text=f'  [Gemini {model_id}]  완료', text_color='#27ae60'),
+                        stop_btn.configure(state='disabled', fg_color='#333')))
+
+            except urllib.error.HTTPError as e:
+                try:
+                    body = e.read().decode('utf-8', errors='replace')
+                    detail = body[:500]
+                except Exception:
+                    detail = str(e)
+                win.after(0, lambda d=detail: (
+                    _ins(f'\n[HTTP {e.code}] {d}\n', 'hdr_think'),
+                    status_lbl.configure(
+                        text=f'  HTTP {e.code}', text_color='#e74c3c'),
+                    stop_btn.configure(state='disabled', fg_color='#333')))
+
+            except Exception as e:
+                win.after(0, lambda: (
+                    _ins(f'\n[오류] {e}\n', 'hdr_think'),
+                    status_lbl.configure(
+                        text=f'  오류: {e}', text_color='#e74c3c'),
+                    stop_btn.configure(state='disabled', fg_color='#333')))
+
+        win.after(0, lambda: status_lbl.configure(
+            text=f'  [Gemini {model_id}]  송신 완료 — 응답 대기 중...', text_color='#f39c12'))
+        threading.Thread(target=_stream, daemon=True).start()
+
+    def _run_ollama_review(self, model, think_mode=True):
+        """Ollama 스트리밍 요청 → 송신/추론/수신 전체 구분 출력."""
+        win = ctk.CTkToplevel(self)
+        win.title(f'하천망 검토 — {model}')
+        win.geometry('980x800')
+        try:
+            hwnd = windll.user32.GetParent(win.winfo_id())
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(c_int(1)), sizeof(c_int))
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(c_int(1)), sizeof(c_int))
+        except Exception:
+            pass
+
+        top_bar = ctk.CTkFrame(win, fg_color='transparent')
+        top_bar.pack(fill='x', padx=10, pady=(8, 2))
+        status_lbl = ctk.CTkLabel(top_bar, text=f'  [{model}]  대기 중...',
+                                   font=FONT_SMALL, text_color='#f39c12', anchor='w')
+        status_lbl.pack(side='left', fill='x', expand=True)
+
+        stop_event  = threading.Event()   # 중단 신호
+        resp_holder = [None]              # HTTP 연결 참조 (강제 close용)
+
+        def _copy():
+            win.clipboard_clear()
+            win.clipboard_append(txt.get('1.0', 'end'))
+
+        def _stop():
+            stop_event.set()
+            if resp_holder[0] is not None:
+                try: resp_holder[0].close()
+                except Exception: pass
+            status_lbl.configure(text=f'  [{model}]  중단됨', text_color='#e74c3c')
+            stop_btn.configure(state='disabled', fg_color='#333')
+
+        stop_btn = ctk.CTkButton(top_bar, text='■ 중단', command=_stop, width=70, height=26,
+                                 font=FONT_SMALL, fg_color='#922b21', hover_color='#a93226')
+        stop_btn.pack(side='right', padx=(0, 4))
+        ctk.CTkButton(top_bar, text='전체 복사', command=_copy, width=80, height=26,
+                      font=FONT_SMALL, fg_color='#444', hover_color='#555').pack(side='right')
+
+        txt_frame = ctk.CTkFrame(win, fg_color='#0d0d0d')
+        txt_frame.pack(fill='both', expand=True, padx=8, pady=(2, 8))
+        txt = tk.Text(txt_frame, wrap='word', bg='#0d0d0d', fg='#e8e8e8',
+                      font=('맑은 고딕', 10), relief='flat', padx=14, pady=10,
+                      insertbackground='white', selectbackground='#444')
+        sb = ctk.CTkScrollbar(txt_frame, command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        txt.pack(fill='both', expand=True)
+
+        # 색상 태그 정의
+        txt.tag_config('hdr_send',   foreground='#3498db', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('prompt',     foreground='#85c1e9', font=('맑은 고딕',  9))
+        txt.tag_config('hdr_think',  foreground='#f39c12', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('thinking',   foreground='#e59866', font=('맑은 고딕',  9, 'italic'))
+        txt.tag_config('hdr_recv',   foreground='#2ecc71', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('response',   foreground='#e8e8e8', font=('맑은 고딕', 10))
+        txt.tag_config('diagram',    foreground='#a8d8a8', font=('Consolas',   10))
+        txt.tag_config('hdr_raw',    foreground='#888888', font=('맑은 고딕',  9, 'bold'))
+        txt.tag_config('raw',        foreground='#666666', font=('Consolas',   8))
+        txt.tag_config('sep',        foreground='#444444')
+
+        # 다이어그램 라인 감지 문자
+        _DIAG_CHARS = set('╔╗╚╝║═╠╣╦╩╬─│┌┐└┘├┤┬┴┼▶◀▲▼⚠✓')
+        _DIAG_STARTS = ('[', '(', '──', '  [', '  (', '  ╔', '  ╚', '  ║')
+
+        def _is_diagram_line(line):
+            if any(c in line for c in _DIAG_CHARS):
+                return True
+            stripped = line.strip()
+            return any(stripped.startswith(s.strip()) for s in _DIAG_STARTS
+                       if s.strip() in ('[', '(', '──'))
+
+        def _ins(text, tag=''):
+            """태그가 'response'이면 라인별로 다이어그램 감지 후 자동 전환."""
+            if tag == 'response' and '\n' in text:
+                lines = text.split('\n')
+                for i, line in enumerate(lines):
+                    seg = line + ('\n' if i < len(lines) - 1 else '')
+                    t = 'diagram' if _is_diagram_line(line) else 'response'
+                    txt.insert('end', seg, t)
+            elif tag:
+                txt.insert('end', text, tag)
+            else:
+                txt.insert('end', text)
+            txt.see('end')
+
+        def _sep(char='─', n=80):
+            _ins(char * n + '\n', 'sep')
+
+        base_prompt = self._build_review_prompt()
+
+        # think_mode: 프롬프트 앞에 추론 출력 지시 삽입
+        if think_mode:
+            think_instruction = (
+                "Before responding, follow this format strictly:\n"
+                "1. Open a <추론> tag and write your full reasoning process (any language is fine).\n"
+                "2. Close with </추론>.\n"
+                "3. Then write the final report **in Korean**.\n\n"
+                "Example format:\n"
+                "<추론>\n"
+                "Total area is X km², which exceeds 250 km². Therefore ...\n"
+                "</추론>\n\n"
+                "## 1. 적합성 판정표\n...\n\n"
+            )
+            prompt = think_instruction + base_prompt
+        else:
+            prompt = base_prompt
+
+        # ── 송신 프롬프트 출력 ──────────────────────────────────────────────
+        _ins('▶ 송신 프롬프트\n', 'hdr_send')
+        _sep()
+        _ins(prompt + '\n', 'prompt')
+        _sep()
+        _ins('\n')
+
+        # 모델이 사용할 수 있는 추론 태그 쌍 (우선순위 순)
+        THINK_TAG_PAIRS = [
+            ('<추론>',    '</추론>'),
+            ('<think>',   '</think>'),
+            ('<thought>', '</thought>'),
+            ('<thinking>','</thinking>'),
+        ]
+        # 버퍼 보류 길이: 가장 긴 오픈태그 길이
+        MAX_OPEN_LEN = max(len(o) for o, _ in THINK_TAG_PAIRS)
+
+        def _find_open_tag(text):
+            """text 안에서 가장 먼저 나오는 오픈태그 반환. (idx, open, close) or None"""
+            best = None
+            for o, c in THINK_TAG_PAIRS:
+                i = text.find(o)
+                if i != -1:
+                    if best is None or i < best[0]:
+                        best = (i, o, c)
+            return best
+
+        def _stream():
+            try:
+                win.after(0, lambda: status_lbl.configure(
+                    text=f'  [{model}]  전송 중...', text_color='#f39c12'))
+
+                def _make_req(use_ctx=True):
+                    body = {'model': model, 'prompt': prompt, 'stream': True,
+                            'keep_alive': 0}
+                    if use_ctx:
+                        body['options'] = {'num_ctx': 16384}
+                    return urllib.request.Request(
+                        f'{OLLAMA_BASE}/api/generate',
+                        data=json.dumps(body).encode('utf-8'),
+                        headers={'Content-Type': 'application/json'})
+
+                req = _make_req(use_ctx=True)
+
+                think_started = False
+                resp_started  = False
+                in_think      = False
+                close_tag     = ''   # 현재 열린 추론태그에 대응하는 닫힘태그
+                buf           = ''
+
+                with urllib.request.urlopen(req, timeout=300) as resp:
+                    resp_holder[0] = resp
+                    for line in resp:
+                        if stop_event.is_set():
+                            break
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except Exception:
+                            win.after(0, lambda l=line: _ins(f'[파싱오류] {l}\n', 'raw'))
+                            continue
+
+                        # ── 네이티브 thinking 필드 (DeepSeek-R1 등) ────────
+                        native_think = obj.get('thinking', '')
+                        if native_think:
+                            if not think_started:
+                                think_started = True
+                                win.after(0, lambda: (
+                                    _ins('◆ 추론 과정  (thinking field)\n', 'hdr_think'),
+                                    _sep('·')))
+                            win.after(0, lambda c=native_think: _ins(c, 'thinking'))
+
+                        # ── 응답 청크: 다중 추론 태그 파싱 ───────────────
+                        chunk = obj.get('response', '')
+                        if chunk:
+                            buf += chunk
+                            while buf:
+                                if in_think:
+                                    idx = buf.find(close_tag)
+                                    if idx == -1:
+                                        safe = len(buf) - len(close_tag) + 1
+                                        if safe <= 0:
+                                            break
+                                        emit = buf[:safe]
+                                        buf  = buf[safe:]
+                                        win.after(0, lambda c=emit: _ins(c, 'thinking'))
+                                    else:
+                                        emit = buf[:idx]
+                                        buf  = buf[idx + len(close_tag):]
+                                        if emit:
+                                            win.after(0, lambda c=emit: _ins(c, 'thinking'))
+                                        in_think  = False
+                                        close_tag = ''
+                                        if not resp_started:
+                                            resp_started = True
+                                            win.after(0, lambda: (
+                                                _ins('\n'),
+                                                _ins('◆ 수신 응답\n', 'hdr_recv'),
+                                                _sep()))
+                                else:
+                                    found = _find_open_tag(buf)
+                                    if found is None:
+                                        safe = len(buf) - MAX_OPEN_LEN + 1
+                                        if safe <= 0:
+                                            break
+                                        emit = buf[:safe]
+                                        buf  = buf[safe:]
+                                        if not resp_started:
+                                            resp_started = True
+                                            win.after(0, lambda: (
+                                                _ins('◆ 수신 응답\n', 'hdr_recv'),
+                                                _sep()))
+                                        win.after(0, lambda c=emit: _ins(c, 'response'))
+                                    else:
+                                        idx, open_t, close_t = found
+                                        pre = buf[:idx]
+                                        buf = buf[idx + len(open_t):]
+                                        if pre.strip():
+                                            if not resp_started:
+                                                resp_started = True
+                                                win.after(0, lambda: (
+                                                    _ins('◆ 수신 응답\n', 'hdr_recv'),
+                                                    _sep()))
+                                            win.after(0, lambda c=pre: _ins(c, 'response'))
+                                        in_think  = True
+                                        close_tag = close_t
+                                        if not think_started:
+                                            think_started = True
+                                            label = f'◆ 추론 과정  ({open_t} 태그)\n'
+                                            win.after(0, lambda lb=label: (
+                                                _ins(lb, 'hdr_think'),
+                                                _sep('·')))
+
+                        # ── 완료 ──────────────────────────────────────────
+                        if obj.get('done', False):
+                            if buf.strip():
+                                tag = 'thinking' if in_think else 'response'
+                                win.after(0, lambda c=buf, t=tag: _ins(c, t))
+                            stats = (
+                                f"prompt_tokens={obj.get('prompt_eval_count','?')}  "
+                                f"response_tokens={obj.get('eval_count','?')}  "
+                                f"total_duration={obj.get('total_duration',0)//1_000_000}ms"
+                            )
+                            win.after(0, lambda s=stats: (
+                                _ins('\n'),
+                                _sep(),
+                                _ins(f'◆ 완료  {s}\n', 'hdr_recv'),
+                                status_lbl.configure(
+                                    text=f'  [{model}]  완료', text_color='#27ae60'),
+                                stop_btn.configure(state='disabled', fg_color='#333')))
+
+            except urllib.error.HTTPError as e:
+                # Ollama 에러 본문 파싱
+                try:
+                    body = e.read().decode('utf-8', errors='replace')
+                    obj  = json.loads(body)
+                    detail = obj.get('error', body)
+                except Exception:
+                    detail = str(e)
+
+                # 모델 로드 실패: 재시도해도 소용없음
+                _load_fail_keywords = ('failed to load', 'resource limitation', 'cannot load')
+                is_load_fail = any(kw in detail.lower() for kw in _load_fail_keywords)
+
+                if e.code == 500 and is_load_fail:
+                    win.after(0, lambda d=detail: (
+                        _ins(f'\n[HTTP 500 — 모델 로드 실패] {d}\n'
+                             f'→ 재시도 불가. 다른 모델을 선택하세요.\n', 'hdr_think'),
+                        status_lbl.configure(
+                            text=f'  [{model}]  로드 실패 — 다른 모델 사용',
+                            text_color='#e74c3c'),
+                        stop_btn.configure(state='disabled', fg_color='#333')))
+                elif e.code == 500:
+                    win.after(0, lambda d=detail: _ins(
+                        f'\n[HTTP 500] {d}\n→ num_ctx 옵션 없이 재시도...\n', 'hdr_think'))
+                    try:
+                        req2 = _make_req(use_ctx=False)
+                        think_started = resp_started = in_think = False
+                        close_tag = buf = ''
+                        with urllib.request.urlopen(req2, timeout=300) as resp2:
+                            resp_holder[0] = resp2
+                            for line in resp2:
+                                if stop_event.is_set():
+                                    break
+                                line = line.strip()
+                                if not line:
+                                    continue
+                                try:
+                                    obj2 = json.loads(line)
+                                    chunk = obj2.get('response', '')
+                                    if chunk:
+                                        if not resp_started:
+                                            resp_started = True
+                                            win.after(0, lambda: (
+                                                _ins('◆ 수신 응답 (재시도)\n', 'hdr_recv'),
+                                                _sep()))
+                                        win.after(0, lambda c=chunk: _ins(c, 'response'))
+                                    if obj2.get('done', False):
+                                        stats2 = (
+                                            f"prompt_tokens={obj2.get('prompt_eval_count','?')}  "
+                                            f"response_tokens={obj2.get('eval_count','?')}  "
+                                            f"total_duration={obj2.get('total_duration',0)//1_000_000}ms"
+                                        )
+                                        win.after(0, lambda s=stats2: (
+                                            _ins('\n'), _sep(),
+                                            _ins(f'◆ 완료 (재시도)  {s}\n', 'hdr_recv'),
+                                            status_lbl.configure(
+                                                text=f'  [{model}]  완료', text_color='#27ae60'),
+                                            stop_btn.configure(state='disabled', fg_color='#333')))
+                                except Exception:
+                                    pass
+                    except Exception as e2:
+                        win.after(0, lambda err=e2: (
+                            _ins(f'\n[재시도 오류] {err}\n', 'hdr_think'),
+                            status_lbl.configure(text=f'  재시도 오류: {err}', text_color='#e74c3c')))
+                else:
+                    win.after(0, lambda d=detail: (
+                        _ins(f'\n[HTTP {e.code}] {d}\n', 'hdr_think'),
+                        status_lbl.configure(text=f'  HTTP {e.code}: {d[:60]}', text_color='#e74c3c')))
+
+            except Exception as e:
+                win.after(0, lambda: (
+                    _ins(f'\n[오류] {e}\n', 'hdr_think'),
+                    status_lbl.configure(
+                        text=f'  오류: {e}', text_color='#e74c3c')))
+
+        win.after(0, lambda: status_lbl.configure(
+            text=f'  [{model}]  송신 완료 — 응답 대기 중...', text_color='#f39c12'))
+        threading.Thread(target=_stream, daemon=True).start()
+
+    # ── 표준지침 4.3.3 자동분석 (규칙 기반) ─────────────────────────────────
+    def _run_guideline_checker(self):
+        """네트워크 JSON에서 DAG를 구성, 표준지침 4.3.3조 적합성을 코드로 판정."""
+        # ── 1. 네트워크 JSON 로드 ──
+        net_path = getattr(self, '_net_json_path', None)
+        if not net_path or not os.path.isfile(net_path):
+            messagebox.showwarning('알림', '네트워크 JSON 파일이 없습니다.')
+            return
+        with open(net_path, encoding='utf-8') as f:
+            net = json.load(f)
+
+        nodes_list = net.get('nodes', [])
+        edges_list = net.get('edges', [])
+
+        # ── 2. DAG 자료구조 구축 ──
+        nodes = {}  # id -> dict
+        for n in nodes_list:
+            nodes[n['id']] = n
+        children = {}   # id -> [(child_id, edge)]
+        parents  = {}   # id -> [(parent_id, edge)]
+        for nid in nodes:
+            children[nid] = []
+            parents[nid]  = []
+        for e in edges_list:
+            children[e['src']].append((e['dst'], e))
+            parents[e['dst']].append((e['src'], e))
+
+        # ── 3. 소유역/합류점/출구 분류 ──
+        subbasins = {nid: n for nid, n in nodes.items() if n['type'] == 'SUBBASIN'}
+        junctions = {nid: n for nid, n in nodes.items() if n['type'] == 'JUNCTION'}
+        outlets   = {nid: n for nid, n in nodes.items() if n['type'] == 'OUTLET'}
+        reservoirs= {nid: n for nid, n in nodes.items() if n['type'] == 'RESERVOIR'}
+
+        # ── 4. 누적면적 계산 (상류→하류 BFS) ──
+        cum_area = {}
+        def calc_cum(nid):
+            if nid in cum_area:
+                return cum_area[nid]
+            n = nodes[nid]
+            if n['type'] == 'SUBBASIN':
+                a = n.get('params', {}).get('A', 0)
+                cum_area[nid] = a
+                return a
+            total = 0
+            for pid, _ in parents[nid]:
+                total += calc_cum(pid)
+            cum_area[nid] = total
+            return total
+
+        outlet_id = list(outlets.keys())[0] if outlets else None
+        if outlet_id is None:
+            messagebox.showwarning('알림', '출구(OUTLET) 노드가 없습니다.')
+            return
+        total_area = calc_cum(outlet_id)
+
+        # ── 5. 하도추적 엣지 목록 ──
+        reach_edges = [e for e in edges_list if e.get('reach_params')]
+        reach_labels = [e.get('label', f"E{e['id']}") for e in reach_edges]
+
+        # ── 6. 순차 추적 패턴 감지 ──
+        # 본류 = 출구에서 가장 먼(깊은) 상류까지의 경로
+        # 깊이(depth) 계산: 각 노드에서 최상류까지의 홉 수
+        depth = {}
+        def calc_depth(nid):
+            if nid in depth:
+                return depth[nid]
+            plist = parents.get(nid, [])
+            if not plist:
+                depth[nid] = 0
+                return 0
+            d = max(calc_depth(pid) for pid, _ in plist) + 1
+            depth[nid] = d
+            return d
+        calc_depth(outlet_id)
+
+        main_path_edges = []  # 본류 경로의 reach 엣지
+        def trace_main_stem(nid):
+            """출구에서 상류로 본류 추적 (최장경로=depth 최대)"""
+            cur = nid
+            while True:
+                plist = parents.get(cur, [])
+                if not plist:
+                    break
+                # 깊이 최대인 상류 선택 (동점 시 면적 최대)
+                best_pid, best_edge = max(
+                    plist, key=lambda pe: (depth.get(pe[0], 0), cum_area.get(pe[0], 0)))
+                if best_edge.get('reach_params'):
+                    main_path_edges.append(best_edge)
+                cur = best_pid
+        trace_main_stem(outlet_id)
+
+        sequential_count = len(main_path_edges)
+        has_sequential = sequential_count >= 2
+
+        # ── 7. 적합성 판정 ──
+        checks = []
+
+        # 7-1. 총면적 250km² 초과 여부
+        area_over = total_area > 250
+        checks.append({
+            'item': '유역면적 250 km² 기준',
+            'result': '해당' if area_over else '미해당',
+            'detail': f'총면적 {total_area:.1f} km² → {"250 km² 초과, 중규모 유역 분할 필요" if area_over else "250 km² 이하, 분할 불필요"}'
+        })
+
+        # 7-2. 개별 소유역 면적 체크
+        large_basins = [(n['name'], n['params'].get('A', 0)) for n in subbasins.values()
+                        if n.get('params', {}).get('A', 0) > 250]
+        checks.append({
+            'item': '개별 소유역 면적 상한',
+            'result': '부적합' if large_basins else '적합',
+            'detail': (f'면적 초과 소유역: {", ".join(f"{nm}({a:.1f}km²)" for nm,a in large_basins)}'
+                       if large_basins else '모든 소유역 250 km² 이하')
+        })
+
+        # 7-3. 하도추적 방식 (순차 추적 여부)
+        if area_over and has_sequential:
+            route_verdict = '부적합'
+            route_detail = (f'본류 경로에 {sequential_count}개 하도추적 구간이 순차 배치됨 → '
+                            '표준지침 위반 (구간별 순차 추적 금지)')
+        elif area_over and not has_sequential:
+            route_verdict = '적합'
+            route_detail = '순차 추적 패턴 미발견'
+        else:
+            route_verdict = '해당없음'
+            route_detail = '250 km² 이하 유역 — 순차 추적 허용'
+        checks.append({
+            'item': '하도추적 방식 (순차추적 금지)',
+            'result': route_verdict,
+            'detail': route_detail
+        })
+
+        # 7-4. 자체홍수량 산정 방식
+        # 현재 구성에서 소유역 개별 합산 여부 체크
+        if area_over:
+            # 개별 BASIN → COMBINE 패턴이 있으면 문제
+            basin_count = len(subbasins)
+            checks.append({
+                'item': '자체홍수량 산정 (소유역 개별합산 금지)',
+                'result': '부적합' if basin_count > 3 else '주의',
+                'detail': (f'{basin_count}개 소유역이 개별 UH로 산정 후 합산됨 → '
+                           '중규모 유역 단위 통합 UH 적용 필요')
+            })
+        else:
+            checks.append({
+                'item': '자체홍수량 산정',
+                'result': '해당없음',
+                'detail': '250 km² 이하 유역 — 현행 방식 허용'
+            })
+
+        # 7-5. 댐/저수지 처리
+        has_dam = len(reservoirs) > 0
+        checks.append({
+            'item': '댐/저수지 처리',
+            'result': '적합' if has_dam else '해당없음',
+            'detail': (f'저수지 {len(reservoirs)}개 존재 → 저수지 홍수추적 적용'
+                       if has_dam else '댐/저수지 없음')
+        })
+
+        # ── 8. 중규모 유역 자동 분할 ──
+        medium_watersheds = []
+        if area_over:
+            # 본류 경로의 합류점 (JUNCTION)에서 누적면적 ≤ 250 km² 기준으로 컷
+            # 전략: 출구에서 역추적, 누적면적이 250을 넘는 첫 지점에서 분할
+            # → 상류에서 하류로 순서 정렬
+
+            # 본류 합류점 순서 (상류→하류) — depth 기준 본류 추적
+            main_junctions = []
+            cur = outlet_id
+            while True:
+                plist = parents.get(cur, [])
+                if not plist:
+                    break
+                best_pid, _ = max(
+                    plist, key=lambda pe: (depth.get(pe[0], 0), cum_area.get(pe[0], 0)))
+                if nodes[cur]['type'] in ('JUNCTION', 'OUTLET'):
+                    main_junctions.append(cur)
+                cur = best_pid
+            main_junctions.reverse()  # 상류→하류
+
+            # 각 합류점에 유입되는 소유역 목록 (DFS)
+            def collect_subbasins(nid, stop_set):
+                """nid 상류의 소유역 수집, stop_set에 있는 노드는 진입 안함"""
+                result = []
+                stack = [nid]
+                visited = set()
+                while stack:
+                    c = stack.pop()
+                    if c in visited:
+                        continue
+                    visited.add(c)
+                    n = nodes.get(c)
+                    if not n:
+                        continue
+                    if n['type'] == 'SUBBASIN':
+                        result.append(n)
+                        continue
+                    for pid, _ in parents.get(c, []):
+                        if pid not in stop_set:
+                            stack.append(pid)
+                return result
+
+            # 분할 로직: 상류→하류 순회하며 누적면적 250 초과 시 직전 합류점에서 컷
+            cut_points = set()
+            mw_idx = 0
+            base_area = 0  # 마지막 분할점의 누적면적
+
+            last_valid = None  # 250 이내인 마지막 합류점
+            for jid in main_junctions:
+                ca = cum_area.get(jid, 0)
+                incremental = ca - base_area
+                if incremental > 250:
+                    if last_valid is not None:
+                        cut_points.add(last_valid)
+                        base_area = cum_area.get(last_valid, 0)
+                        last_valid = None
+                        # 현재 jid 재평가
+                        if ca - base_area <= 250:
+                            last_valid = jid
+                    else:
+                        # 첫 합류점부터 250 초과 — 여기서 강제 분할
+                        cut_points.add(jid)
+                        base_area = ca
+                else:
+                    last_valid = jid
+
+            # 분할점이 없으면 중간 합류점에서 가장 균등하게 분할
+            if not cut_points and total_area > 250:
+                best_j = None
+                best_diff = float('inf')
+                for jid in main_junctions:
+                    if nodes[jid]['type'] != 'JUNCTION':
+                        continue
+                    ca = cum_area.get(jid, 0)
+                    rest = total_area - ca
+                    if ca <= 250 and rest <= 250:
+                        diff = abs(ca - rest)
+                        if diff < best_diff:
+                            best_diff = diff
+                            best_j = jid
+                if best_j is None:
+                    # 250 이하 조건 완화 — 가장 균등하게
+                    for jid in main_junctions:
+                        if nodes[jid]['type'] != 'JUNCTION':
+                            continue
+                        ca = cum_area.get(jid, 0)
+                        rest = total_area - ca
+                        diff = abs(ca - rest)
+                        if diff < best_diff:
+                            best_diff = diff
+                            best_j = jid
+                if best_j:
+                    cut_points.add(best_j)
+
+            # 분할점 순서 정렬 (상류→하류)
+            cut_list = sorted(cut_points, key=lambda jid: cum_area.get(jid, 0))
+
+            # 각 중규모 유역 구성
+            boundaries = [None] + cut_list + [outlet_id]
+            for i in range(len(boundaries) - 1):
+                upstream_boundary = boundaries[i]
+                downstream_boundary = boundaries[i + 1]
+
+                stop = set()
+                if upstream_boundary is not None:
+                    stop.add(upstream_boundary)
+                    # 상류 경계 노드의 상류도 제외
+                    def add_upstream(nid):
+                        for pid, _ in parents.get(nid, []):
+                            stop.add(pid)
+                            add_upstream(pid)
+                    add_upstream(upstream_boundary)
+
+                subs = collect_subbasins(downstream_boundary, stop)
+                sub_area = sum(s.get('params', {}).get('A', 0) for s in subs)
+
+                # 경계 하도추적 구간: src가 stop에 속하고 dst가 stop에 속하지 않는 reach
+                boundary_reaches = []
+                # 내부 노드: stop에 없고 downstream_boundary까지 도달 가능한 노드
+                interior = {s['id'] for s in subs}
+                if upstream_boundary is not None:
+                    for e in reach_edges:
+                        # src가 상류 유역(stop), dst가 이 유역 내부 → 경계 reach
+                        if e['src'] in stop and e['dst'] not in stop:
+                            boundary_reaches.append(e)
+                        # src와 dst 모두 이 유역 내부이고 본류 경로상 → 내부 reach이지만
+                        # 경계 추적 시 통합 대상
+                        elif e['src'] not in stop and e['dst'] not in stop:
+                            src_ca = cum_area.get(e['src'], 0)
+                            dst_ca = cum_area.get(e['dst'], 0)
+                            up_ca = cum_area.get(upstream_boundary, 0)
+                            dn_ca = cum_area.get(downstream_boundary, 0)
+                            if src_ca >= up_ca and dst_ca <= dn_ca:
+                                boundary_reaches.append(e)
+
+                mw_idx += 1
+                roman = ['Ⅰ', 'Ⅱ', 'Ⅲ', 'Ⅳ', 'Ⅴ', 'Ⅵ'][min(mw_idx - 1, 5)]
+                mw_name = f'A-{roman}'
+
+                # 내부 하도추적 구간 (유역 내부 노드 간의 reach)
+                # 유역 내부 노드 = stop에 속하지 않고 downstream_boundary까지 도달 가능
+                interior_nodes = set()
+                def collect_interior(nid):
+                    if nid in interior_nodes or nid in stop:
+                        return
+                    interior_nodes.add(nid)
+                    for pid, _ in parents.get(nid, []):
+                        if pid not in stop:
+                            collect_interior(pid)
+                collect_interior(downstream_boundary)
+
+                internal_reaches = []
+                for e in reach_edges:
+                    if e['src'] in interior_nodes and e['dst'] in interior_nodes:
+                        if e not in boundary_reaches:
+                            internal_reaches.append(e)
+
+                medium_watersheds.append({
+                    'name': mw_name,
+                    'subbasins': sorted(subs, key=lambda s: s['name']),
+                    'area': sub_area,
+                    'cum_area': cum_area.get(downstream_boundary, 0),
+                    'boundary_node': nodes.get(downstream_boundary, {}).get('name', ''),
+                    'upstream_node': nodes.get(upstream_boundary, {}).get('name', '') if upstream_boundary else '(최상류)',
+                    'internal_reaches': internal_reaches,
+                    'boundary_reaches': boundary_reaches,
+                })
+
+        # ── 9. 보고서 생성 ──
+        report = []
+        report.append('=' * 80)
+        report.append('■ 표준지침 4.3.3조 적합성 자동분석 보고서')
+        report.append('=' * 80)
+        report.append('')
+
+        # 9-1. 기본 정보
+        report.append('【기본 정보】')
+        report.append(f'  총 유역면적: {total_area:.1f} km²')
+        report.append(f'  소유역 수: {len(subbasins)}개')
+        report.append(f'  하도추적 구간: {len(reach_edges)}개 ({", ".join(reach_labels)})')
+        report.append(f'  합류 지점: {len(junctions)}개')
+        report.append(f'  저수지: {len(reservoirs)}개')
+        report.append('')
+
+        # 소유역 목록
+        report.append('【소유역 목록】')
+        for n in sorted(subbasins.values(), key=lambda s: s['name']):
+            p = n.get('params', {})
+            report.append(f"  {n['name']:10s}  A={p.get('A',0):7.1f} km²  "
+                          f"Tc={p.get('Tc',0):5.2f}hr  R={p.get('R',0):5.2f}hr  "
+                          f"CN={p.get('CN',0):5.1f}")
+        report.append('')
+
+        # 9-2. 적합성 판정표
+        report.append('─' * 80)
+        report.append('■ 1. 적합성 판정표')
+        report.append('─' * 80)
+        report.append(f'  {"검토 항목":<35s} {"판정":<10s} {"근거"}')
+        report.append('  ' + '─' * 76)
+        for c in checks:
+            report.append(f"  {c['item']:<35s} {c['result']:<10s} {c['detail']}")
+        report.append('')
+
+        # 전체 판정
+        has_fail = any(c['result'] == '부적합' for c in checks)
+        overall = '부적합 — 개선 필요' if has_fail else '적합'
+        report.append(f'  ▶ 종합 판정: {overall}')
+        report.append('')
+
+        # 9-3. 문제점 상세 분석
+        report.append('─' * 80)
+        report.append('■ 2. 문제점 상세 분석')
+        report.append('─' * 80)
+        if not has_fail:
+            report.append('  특이사항 없음 — 현행 구성이 표준지침에 적합합니다.')
+        else:
+            if area_over and has_sequential:
+                report.append('')
+                report.append('  [문제 1] 순차적 하도추적에 의한 첨두홍수량 과다 산정')
+                report.append('')
+                report.append(f'  현재 구성: 본류 경로에 {sequential_count}개 하도추적 구간이 순차 배치')
+                report.append(f'  관련 구간: {", ".join(e.get("label", "?") for e in main_path_edges)}')
+                report.append('')
+                report.append('  ◆ 과다산정 메커니즘:')
+                report.append('    1차: 작은 소유역 → 짧은 Tc → 뾰족한 UH(종거 큼) → 높은 첨두')
+                report.append('    2차: 하도 저류효과 미미 → 감쇠 없이 하류 누적')
+                report.append('    결과: 하류로 갈수록 첨두홍수량이 비현실적으로 증가')
+                report.append('')
+                report.append('  ◆ 표준지침 해결 방향:')
+                report.append('    → 중규모 유역(≤250 km²)으로 묶어 통합 UH 적용')
+                report.append('    → 중규모 유역 내부 하도추적 제거')
+                report.append('    → 중규모 유역 간 경계는 한꺼번에 하도추적')
+                report.append('')
+
+            if area_over:
+                report.append('')
+                report.append('  [문제 2] 소유역 개별 UH 합산 방식')
+                report.append('')
+                report.append(f'  현재: {len(subbasins)}개 소유역 각각 개별 UH 산정 → 합산')
+                report.append('  문제: 작은 소유역의 뾰족한 UH가 첨두를 과대 추정')
+                report.append('  개선: 중규모 유역 단위 통합 면적에 단일 UH 적용 필요')
+
+        report.append('')
+
+        # 9-4. 텍스트 다이어그램
+        report.append('─' * 80)
+        report.append('■ 3. 텍스트 다이어그램')
+        report.append('─' * 80)
+        report.append('')
+
+        # 다이어그램 A: 현재 구조
+        report.append('  [다이어그램 A] 현재 구조 — 문제점 표시')
+        report.append('')
+
+        # 본류 경로 역순으로 다이어그램 생성
+        def build_current_diagram():
+            lines = []
+            cur = outlet_id
+            visited_diag = set()
+            level = 0
+
+            def draw_node(nid, indent):
+                if nid in visited_diag:
+                    return
+                visited_diag.add(nid)
+                n = nodes.get(nid)
+                if not n:
+                    return
+
+                plist = parents.get(nid, [])
+                prefix = '    ' * indent
+
+                if n['type'] == 'SUBBASIN':
+                    a = n.get('params', {}).get('A', 0)
+                    lines.append(f'{prefix}[{n["name"]} {a:.1f}km²]')
+                elif n['type'] == 'OUTLET':
+                    lines.append(f'{prefix}({n["name"]}) ◀── 출구')
+                elif n['type'] == 'JUNCTION':
+                    lines.append(f'{prefix}({n["name"]}) ◀── 합류')
+                elif n['type'] == 'RESERVOIR':
+                    lines.append(f'{prefix}⬡{n["name"]}⬡ ◀── 저수지')
+
+                for pid, edge in sorted(plist, key=lambda pe: -cum_area.get(pe[0], 0)):
+                    rp = edge.get('reach_params')
+                    if rp:
+                        k = rp.get('K', 0)
+                        label = edge.get('label', '?')
+                        warn = ' ⚠ 순차추적' if (area_over and edge in main_path_edges) else ''
+                        lines.append(f'{prefix}  ├── {label} K={k:.2f}hr ──┤{warn}')
+                    else:
+                        lines.append(f'{prefix}  ├──────────┤')
+                    draw_node(pid, indent + 1)
+
+            draw_node(outlet_id, 1)
+            return lines
+
+        diag_lines = build_current_diagram()
+        for dl in diag_lines:
+            report.append(dl)
+        report.append('')
+
+        # 다이어그램 B: 개선 후 구조
+        if medium_watersheds:
+            report.append('  [다이어그램 B] 개선 후 구조 (표준지침 적용)')
+            report.append('')
+            for mw in medium_watersheds:
+                sub_names = [s['name'] for s in mw['subbasins']]
+                sub_areas = [s.get('params', {}).get('A', 0) for s in mw['subbasins']]
+                report.append(f'    ╔══ {mw["name"]} ({mw["area"]:.1f} km²) ═══{"═" * 40}╗')
+                report.append(f'    ║  상류경계: {mw["upstream_node"]}')
+                report.append(f'    ║  하류경계: {mw["boundary_node"]} (누적 {mw["cum_area"]:.1f} km²)')
+                report.append(f'    ║  소유역: {", ".join(sub_names)}')
+                report.append(f'    ║  면적: {" + ".join(f"{a:.1f}" for a in sub_areas)} = {mw["area"]:.1f} km²')
+                if mw['internal_reaches']:
+                    r_labels = [e.get('label', '?') for e in mw['internal_reaches']]
+                    report.append(f'    ║  내부 하도추적 (제거 대상): {", ".join(r_labels)}')
+                else:
+                    report.append(f'    ║  내부 하도추적: 없음 ✓')
+                if mw['boundary_reaches']:
+                    r_labels = [e.get('label', '?') for e in mw['boundary_reaches']]
+                    k_sum = sum(e.get('reach_params', {}).get('K', 0) for e in mw['boundary_reaches'])
+                    report.append(f'    ║  경계 하도추적 (통합 적용): {", ".join(r_labels)} → 통합 K={k_sum:.2f}hr')
+                report.append(f'    ╚{"═" * 60}╝')
+                report.append('')
+        report.append('')
+
+        # 9-5. 개선 방안
+        report.append('─' * 80)
+        report.append('■ 4. 표준지침 기반 개선 방안')
+        report.append('─' * 80)
+
+        if not medium_watersheds:
+            report.append('  총면적 250 km² 이하 — 현행 방식 유지 가능')
+        else:
+            report.append(f'  전체 유역({total_area:.1f} km²)을 {len(medium_watersheds)}개 중규모 유역으로 분할:')
+            report.append('')
+
+            for mw in medium_watersheds:
+                sub_names = [s['name'] for s in mw['subbasins']]
+                report.append(f'  ◆ {mw["name"]} ({mw["area"]:.1f} km², 경계: {mw["upstream_node"]} → {mw["boundary_node"]})')
+                report.append(f'    소유역: {", ".join(sub_names)}')
+
+                if mw['upstream_node'] == '(최상류)':
+                    report.append(f'    방법: 유역추적만 (하도추적 제외)')
+                    report.append(f'    → {mw["area"]:.1f} km² 전체에 통합 UH 적용')
+                    if mw['internal_reaches']:
+                        r_labels = [e.get('label', '?') for e in mw['internal_reaches']]
+                        report.append(f'    → 내부 하도추적 구간 제거: {", ".join(r_labels)}')
+                else:
+                    report.append(f'    방법: 직상류 출구 홍수량 → 경계 하도추적 + 자체홍수량 합성')
+                    if mw['boundary_reaches']:
+                        r_labels = [e.get('label', '?') for e in mw['boundary_reaches']]
+                        k_sum = sum(e.get('reach_params', {}).get('K', 0) for e in mw['boundary_reaches'])
+                        report.append(f'    → 경계 하도추적: {" + ".join(r_labels)} = 통합 K={k_sum:.2f}hr (한꺼번에 추적)')
+                    report.append(f'    → 자체홍수량: {mw["area"]:.1f} km²에 통합 UH 적용 (개별 합산 금지)')
+                report.append('')
+
+        # 9-6. 개선 전후 효과
+        report.append('─' * 80)
+        report.append('■ 5. 개선 전후 예상 효과')
+        report.append('─' * 80)
+        if has_fail:
+            report.append('')
+            report.append('  ◆ 첨두홍수량 변화:')
+            report.append('    - 현행: 소유역 개별 UH(짧은 Tc) + 순차 추적 → 첨두 과다 산정')
+            report.append('    - 개선: 중규모 유역 통합 UH(긴 Tc) + 통합 추적 → 첨두 저감')
+            report.append(f'    - 예상: 통합 UH 적용 시 Tc 증가로 종거 감소 → 첨두 10~30% 저감 가능')
+            report.append('')
+            report.append('  ◆ 실무 적용 시 주의사항:')
+            report.append('    - 중규모 유역 면적이 250 km²에 근접할수록 효과 증가')
+            report.append('    - 통합 K값 산정 시 하도 연장·경사 등을 재검토해야 함')
+            report.append('    - 댐이 있는 경우 댐 지점 기준 저수지 추적 선행 필요')
+        else:
+            report.append('  현행 구성이 표준지침에 적합하므로 추가 개선 불필요.')
+
+        report.append('')
+        report.append('=' * 80)
+        report.append('※ 본 보고서는 표준지침 4.3.3조 규칙 기반 자동분석 결과입니다.')
+        report.append('=' * 80)
+
+        full_report = '\n'.join(report)
+
+        # ── 10. 결과 출력 창 ──
+        win = ctk.CTkToplevel(self)
+        win.title('하천망 검토 — 표준지침 4.3.3 자동분석')
+        win.geometry('980x800')
+        try:
+            hwnd = windll.user32.GetParent(win.winfo_id())
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 35, byref(c_int(1)), sizeof(c_int))
+            windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, byref(c_int(1)), sizeof(c_int))
+        except Exception:
+            pass
+
+        top_bar = ctk.CTkFrame(win, fg_color='transparent')
+        top_bar.pack(fill='x', padx=10, pady=(8, 2))
+        status_lbl = ctk.CTkLabel(top_bar, text='  [자동분석]  표준지침 4.3.3 — 분석 완료',
+                                   font=FONT_SMALL, text_color='#2ecc71', anchor='w')
+        status_lbl.pack(side='left', fill='x', expand=True)
+
+        def _copy():
+            win.clipboard_clear()
+            win.clipboard_append(txt.get('1.0', 'end'))
+        ctk.CTkButton(top_bar, text='전체 복사', command=_copy, width=80, height=26,
+                      font=FONT_SMALL, fg_color='#444', hover_color='#555').pack(side='right')
+
+        txt_frame = ctk.CTkFrame(win, fg_color='#0d0d0d')
+        txt_frame.pack(fill='both', expand=True, padx=8, pady=(2, 8))
+        txt = tk.Text(txt_frame, wrap='word', bg='#0d0d0d', fg='#e8e8e8',
+                      font=('맑은 고딕', 10), relief='flat', padx=14, pady=10,
+                      insertbackground='white', selectbackground='#444')
+        sb = ctk.CTkScrollbar(txt_frame, command=txt.yview)
+        txt.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        txt.pack(fill='both', expand=True)
+
+        # 색상 태그
+        txt.tag_config('title',    foreground='#f1c40f', font=('맑은 고딕', 11, 'bold'))
+        txt.tag_config('header',   foreground='#3498db', font=('맑은 고딕', 10, 'bold'))
+        txt.tag_config('ok',       foreground='#2ecc71')
+        txt.tag_config('fail',     foreground='#e74c3c')
+        txt.tag_config('warn',     foreground='#f39c12')
+        txt.tag_config('diagram',  foreground='#a8d8a8', font=('Consolas', 10))
+        txt.tag_config('sep',      foreground='#444444')
+        txt.tag_config('body',     foreground='#e8e8e8', font=('맑은 고딕', 10))
+
+        # 보고서 삽입 (줄별 태그 적용)
+        for line in report:
+            if line.startswith('═') or line.startswith('=' * 10):
+                txt.insert('end', line + '\n', 'sep')
+            elif line.startswith('─') or '─' * 10 in line:
+                txt.insert('end', line + '\n', 'sep')
+            elif line.startswith('■'):
+                txt.insert('end', line + '\n', 'title')
+            elif '부적합' in line:
+                txt.insert('end', line + '\n', 'fail')
+            elif '적합' in line and '부적합' not in line:
+                txt.insert('end', line + '\n', 'ok')
+            elif '해당없음' in line or '미해당' in line:
+                txt.insert('end', line + '\n', 'warn')
+            elif line.strip().startswith('╔') or line.strip().startswith('╚') or line.strip().startswith('║'):
+                txt.insert('end', line + '\n', 'diagram')
+            elif '⚠' in line:
+                txt.insert('end', line + '\n', 'fail')
+            elif '✓' in line:
+                txt.insert('end', line + '\n', 'ok')
+            elif line.strip().startswith('◆') or line.strip().startswith('▶'):
+                txt.insert('end', line + '\n', 'header')
+            elif line.strip().startswith('[') or line.strip().startswith('(') or line.strip().startswith('├'):
+                txt.insert('end', line + '\n', 'diagram')
+            else:
+                txt.insert('end', line + '\n', 'body')
+
+        txt.configure(state='disabled')
+
+    def _build_review_prompt(self):
+        """하천망 구조를 파싱하여 표준지침 검토용 프롬프트 생성."""
+        ops = self.operations
+        basins   = [op for op in ops if op['type'] == 'BASIN']
+        routes   = [op for op in ops if op['type'] == 'ROUTE']
+        combines = [op for op in ops if op['type'] == 'COMBINE']
+        total_area = sum(op.get('A', 0) for op in basins)
+
+        basin_lines = [
+            f"  - {op['name']}: A={op.get('A',0):.1f} km², "
+            f"Tc={op.get('Tc',0):.2f}hr, R={op.get('R',0):.2f}hr, CN={op.get('CN',0):.1f}"
+            for op in basins
+        ]
+        route_lines = [
+            f"  - {op['name']}: K={op.get('K',0):.2f}hr, X={op.get('X',0):.3f}, NSTPS={op.get('NSTPS',0)}"
+            for op in routes
+        ]
+        combine_lines = [
+            f"  - {op['name']}: {op.get('N',2)}개 수문곡선 합류"
+            for op in combines
+        ]
+        order_lines = []
+        for i, op in enumerate(ops, 1):
+            t = op['type']
+            if t == 'BASIN':
+                order_lines.append(f"  {i:2d}. [소유역]   {op['name']} (A={op.get('A',0):.1f} km²)")
+            elif t == 'ROUTE':
+                order_lines.append(f"  {i:2d}. [하도추적] {op['name']} (K={op.get('K',0):.2f}hr, X={op.get('X',0):.3f})")
+            elif t == 'COMBINE':
+                order_lines.append(f"  {i:2d}. [합류]     {op['name']} ({op.get('N',2)}개 합산)")
+
+        nl = '\n'
+        return f"""당신은 수문학 전문가입니다. 아래 제시한 "홍수량 산정 표준지침(환경부, 2019)" 4.3.3조의 규정을 완전히 숙지한 후, 검토 대상 하천망이 이 규정에 적합한지 판정하고 문제점 및 개선방안을 한국어 보고서로 작성하세요.
+
+================================================================================
+■ 홍수량 산정 표준지침(환경부, 2019) 제4.3.3조 전문
+================================================================================
+
+【가. 단위도 적용을 위한 소유역 분할 기준】
+
+(1) 대규모 유역의 경우 단위도의 기본 가정을 벗어나는 강우-유출관계가 예상되므로,
+    전체 유역을 적절한 개수의 유역과 하도구간으로 나누어 단위도의 적용과 하도추적을
+    병행하여 수문곡선을 합성해 나가는 것이 타당한 방법이다.
+    유역면적이 약 250 km² 이하에서 단위도 사용을 추천하며, 250 km² 이상에서는
+    정확도가 감소한다.
+
+(2) 표준지침에서는 유역면적이 250 km² 이상인 유역에서의 유출계산은 전체 유역을
+    적절한 개수의 소유역과 하도구간으로 분할하여 소유역에 단위도를 적용하고
+    하도구간에 대해 홍수추적을 축차적으로 행하여 홍수 수문곡선을 합성한다.
+
+(3) 유역면적 250 km² 이하인 유역에서도 홍수량 저감효과가 있는 구조물이 위치하는
+    경우와 하도저류효과를 고려할 수 있는 하천유역에서는 소유역을 분할해서
+    홍수량을 산정할 수 있다.
+
+【나. 소유역을 분할한 경우의 홍수량 산정 절차】
+
+(1) 대상 유역면적이 250 km² 이상인 경우는 소유역을 분할해서 홍수량을 산정한다.
+    「설계홍수량 산정 요령(국토해양부, 2012)」에서는 홍수량 산정지점(P-Ⅰ-1, P-Ⅰ-2,
+    ……, P-Ⅲ-2 등)을 기준으로 유역을 여러 개의 소유역으로 분할하여 상류에서 하류
+    방향으로 유역추적과 하도추적을 반복하면서 홍수량을 산정하는 방법을 제시하였다.
+
+(2) 소유역을 분할하여 하도추적을 실시할 경우, 분할된 소유역의 홍수도달시간이 짧으면
+    단위도의 종거가 커지기 때문에 첨두홍수량이 커질 수 있다. 이때 하도의 저류효과가
+    크지 않을 경우 첨두홍수량의 감소가 미미하므로 하류로 내려가면서 이 영향이 누적되어
+    홍수량이 너무 커지는 문제가 발생할 수 있다.
+    이러한 문제점을 해소하기 위해 다음과 같은 하도추적 방법의 적용을 추천한다:
+
+  1) 분석 대상유역의 홍수량 산정지점(P-Ⅰ-1, P-Ⅰ-2, ……, P-Ⅲ-2 등) 기준으로
+     여러 개의 소유역(A-Ⅰ-1, A-Ⅰ-2, ……, A-Ⅲ-2 등)으로 분할하기 이전에,
+     전체 대상 유역을 상류로부터 하류 방향으로 유역면적이 약 250 km² 이하인
+     몇 개의 중규모 유역(A-Ⅰ, A-Ⅱ, A-Ⅲ 등)으로 먼저 분할하고,
+     최상류 중규모 유역의 홍수량을 유역추적 방법으로 산정한 후,
+     이를 직하류 구간에 대한 하도추적 대상 홍수량으로 채택한다.
+     ※ 최상류 중규모 유역 내부에서는 하도추적 없이 소유역 홍수량을 합산한다.
+
+  2) 하류 방향으로의 하도추적은 홍수량 산정지점 구간별로 순차적으로 시행하는 것이
+     아니라, 분할된 직상류의 중규모 유역 홍수량을 홍수량 산정지점별 해당 하도구간에
+     대하여 한꺼번에 실시한다.
+     ※ 예: P-Ⅱ-3 지점 → P-Ⅰ-3의 홍수량을 L-Ⅱ-1 + L-Ⅱ-2 + L-Ⅱ-3 구간을
+            합한 하나의 구간에 대해 한꺼번에 하도추적. (P-Ⅱ-1 → P-Ⅱ-2 → P-Ⅱ-3
+            순서의 구간별 순차 추적 금지)
+
+  3) 하도추적 후 합성되는 자체 소유역의 홍수량은 홍수량 산정지점별로,
+     직상류 중규모 유역 출구지점에서 해당 홍수량 산정지점까지의 면적에 대하여
+     한꺼번에 산정한다.
+     ※ 예: P-Ⅱ-3 지점의 자체 소유역 홍수량 → A-Ⅱ-1 + A-Ⅱ-2 + A-Ⅱ-3을
+            하나의 유역으로 묶어 한꺼번에 단위도 적용.
+            (A-Ⅱ-1, A-Ⅱ-2, A-Ⅱ-3 각각 개별 산정 후 합산 금지)
+
+  4) 만약 대상 하천수계 내에 홍수조절용량을 가진 댐이 위치하고 있을 경우에는,
+     댐 지점을 기준으로 하여 저수지 홍수추적을 실시하고 댐 직하류부터
+     하도추적을 계속해야 한다.
+
+(3) 하도추적 포함방법에 의한 홍수량 산정절차 (예시: 총면적 약 600 km²):
+
+  [1단계] 전체 유역을 250 km² 이하로 분할:
+    - 중규모 유역Ⅰ: 240 km² (최상류)
+    - 중규모 유역Ⅱ: 230 km²
+    - 중규모 유역Ⅲ: 130 km² (최하류)
+
+  [2단계] 중규모 유역Ⅰ 홍수량 산정:
+    - P-Ⅰ-1, P-Ⅰ-2, P-Ⅰ-3 지점 모두 하도추적 제외(유역추적만) 방법으로 산정
+    - 즉, 유역Ⅰ 내 소유역들의 홍수량을 하도추적 없이 합산하여 P-Ⅰ-3 출구 홍수량 확정
+
+  [3단계] 중규모 유역Ⅱ 각 산정지점 홍수량:
+    - P-Ⅱ-1: P-Ⅰ-3 홍수량 → L-Ⅱ-1 구간 하도추적 + A-Ⅱ-1 자체홍수량 합성
+    - P-Ⅱ-2: P-Ⅰ-3 홍수량 → (L-Ⅱ-1+L-Ⅱ-2) 합한 하나의 구간 하도추적
+              + (A-Ⅱ-1+A-Ⅱ-2) 합한 하나의 유역 자체홍수량 합성
+    - P-Ⅱ-3: P-Ⅰ-3 홍수량 → (L-Ⅱ-1+L-Ⅱ-2+L-Ⅱ-3) 합한 하나의 구간 하도추적
+              + (A-Ⅱ-1+A-Ⅱ-2+A-Ⅱ-3) 합한 하나의 유역 자체홍수량 합성
+
+  [4단계] 중규모 유역Ⅲ 각 산정지점 홍수량:
+    - P-Ⅲ-1: P-Ⅱ-3 홍수량 → L-Ⅲ-1 구간 하도추적 + A-Ⅲ-1 자체홍수량 합성
+    - P-Ⅲ-2: P-Ⅱ-3 홍수량 → (L-Ⅲ-1+L-Ⅲ-2) 합한 하나의 구간 하도추적
+              + (A-Ⅲ-1+A-Ⅲ-2) 합한 하나의 유역 자체홍수량 합성
+
+================================================================================
+■ 검토 대상 하천망
+================================================================================
+
+총 유역면적: {total_area:.1f} km²
+소유역 수: {len(basins)}개 / 하도추적 구간: {len(routes)}개 / 합류 지점: {len(combines)}개
+
+【소유역 목록】
+{nl.join(basin_lines) if basin_lines else '  (없음)'}
+
+【하도추적 구간】
+{nl.join(route_lines) if route_lines else '  (없음)'}
+
+【합류 지점】
+{nl.join(combine_lines) if combine_lines else '  (없음)'}
+
+【수문 분석 실행 순서 (DFS 기준)】
+{nl.join(order_lines)}
+
+================================================================================
+■ 보고서 작성 요청
+================================================================================
+
+위 표준지침 전문을 기준으로 다음 5개 항목으로 보고서를 작성하세요:
+
+1. 적합성 판정표
+   - 항목별(소유역 면적 상한 / 중규모 유역 분할 / 하도추적 방식 / 자체 소유역 합산 / 댐 처리)
+   - 각 항목: 적합 / 불합리 / 해당없음 판정 + 근거
+
+2. 문제점 상세 분석
+   - 불합리 항목별로 현재 구성의 구체적 문제 설명
+   - 첨두홍수량 과다 산정이 우려되는 지점 및 이유
+
+3. 텍스트 다이어그램 (반드시 포함)
+
+   아래 두 가지 다이어그램을 ASCII/텍스트 기호로 작성하세요.
+   기호 규칙:
+     [소유역명 면적km²]   : 소유역 박스
+     (합류점명)           : 합류 지점
+     ──K=X.Xhr──▶        : 하도추적 엣지 (K값 표시)
+     ──────▶              : 하도추적 없는 직접 연결
+     ╔══중규모유역명══╗   : 중규모 유역 그룹 경계
+     ⚠                   : 문제 지점 표시
+     ✓                   : 표준지침 적합 지점
+
+   [다이어그램 A] 현재 구조 — 문제점 표시
+   - 전체 하천망을 상류→하류 방향으로 표현
+   - ⚠ 기호로 순차 추적 문제 지점 명시
+   - 각 소유역 면적 표시
+
+   [다이어그램 B] 개선 후 구조 (표준지침 적용)
+   - 중규모 유역 A-Ⅰ, A-Ⅱ 등을 ╔══╗ 박스로 구분
+   - 각 중규모 유역 내부: 소유역 합산 방식 표시
+   - 중규모 유역 간 경계: 한꺼번에 하도추적하는 구간 명시
+   - ✓ 기호로 표준지침 적합 처리 표시
+
+4. 표준지침 기반 개선 방안 (문자 설명)
+   - 중규모 유역 분할 기준 및 각 유역 구성 소유역 목록
+   - 각 중규모 유역별 하도추적 재구성 방법
+   - 자체 소유역 묶음 방법
+
+5. 개선 전후 예상 효과
+   - 첨두홍수량 변화 방향 및 크기 예상
+   - 실무 적용 시 주의사항
+
+실무 수문 엔지니어가 즉시 활용할 수 있도록 구체적인 소유역명과 수치를 포함하여 작성하세요.
+다이어그램은 등폭 텍스트(monospace)로 작성하며, 한눈에 전체 구조를 파악할 수 있도록 충분한 공간을 사용하세요."""
 
     def _on_network_applied(self, ops):
         self.operations = ops
@@ -3173,6 +4763,9 @@ class FloodRoutingApp(ctk.CTk):
         dt_hr    = dt_min / 60.0
         time_hr  = np.arange(NQ) * dt_hr
 
+        plt, FigureCanvasTkAgg = _ensure_mpl()
+        plt.rcParams['font.family']        = 'Malgun Gothic'
+        plt.rcParams['axes.unicode_minus'] = False
         fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
         fig.patch.set_facecolor('#1e1e1e')
         for ax in axes:
@@ -3259,6 +4852,9 @@ class FloodRoutingApp(ctk.CTk):
         out   = os.path.join(self.project_path, fname)
         try:
             self._write_excel(out)
+            ops, _ = self._canvas.build_operations()
+            out_path = os.path.splitext(out)[0] + '.out'
+            self._write_out_file(out_path, ops)
             self._log(f'Excel 저장: {fname}')
             self._save_config(fname, out)
             messagebox.showinfo('저장 완료', f'저장되었습니다:\n{out}')
@@ -3266,7 +4862,60 @@ class FloodRoutingApp(ctk.CTk):
             self._log(f'Excel 저장 오류: {traceback.format_exc()}')
             messagebox.showerror('저장 오류', traceback.format_exc()[:300])
 
+    def _write_out_file(self, path, ops):
+        """HEC-1 스타일 .out 텍스트 파일 저장."""
+        now = datetime.now()
+        lines = []
+        lines.append('HEC-1 STYLE ANALYSIS OUTPUT (Hydroset)')
+        lines.append(f'RUN DATE  {now.strftime("%d-%b-%y").upper()}  TIME {now.strftime("%H:%M:%S")}')
+        lines.append('')
+
+        # ── 입력 에코 ──────────────────────────────────────────────────────────
+        lines.append('HEC-1 INPUT ECHO')
+        header = '  LINE    ID' + ''.join(f'.......{i}' for i in range(1, 9))
+        lines.append(header)
+        dat_content = self._build_dat_content(ops)
+        for idx, ln in enumerate(dat_content.splitlines(), 1):
+            lines.append(f'{idx:6d}    {ln}')
+        lines.append('')
+
+        # ── Runoff Summary ─────────────────────────────────────────────────────
+        lines.append('RUNOFF SUMMARY')
+        lines.append('-' * 70)
+        lines.append(f'{"#":>4}  {"OP":<16}  {"STATION":<12}  {"PEAK_Q(m³/s)":>14}  {"PEAK_HR":>8}  {"CUM_AREA":>10}')
+        lines.append('-' * 70)
+        for i, row in enumerate(self.processor.summary, 1):
+            lines.append(
+                f'{i:4d}  {row["op"]:<16}  {row["station"]:<12}  '
+                f'{row["peak_q"]:14.3f}  {row["peak_hr"]:8.2f}  {row["cum_area"]:10.2f}'
+            )
+        lines.append('')
+
+        # ── 지점별 수문곡선 ────────────────────────────────────────────────────
+        dt_hr = self._dt_min / 60.0
+        for row in self.processor.summary:
+            station = row['station']
+            res = self.processor.results.get(station)
+            if res is None:
+                continue
+            q_arr = res['flow']
+            lines.append(f'STATION: {station}  ({row["op"]})')
+            lines.append(f'{"TIME(hr)":>10}  {"FLOW(m³/s)":>12}')
+            for j, q in enumerate(q_arr):
+                lines.append(f'{j * dt_hr:10.2f}  {q:12.3f}')
+            lines.append('')
+
+        with open(path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(lines))
+
     def _write_excel(self, path):
+        oxl = _ensure_openpyxl()
+        Workbook        = oxl['Workbook']
+        Font            = oxl['Font']
+        PatternFill     = oxl['PatternFill']
+        Alignment       = oxl['Alignment']
+        get_column_letter = oxl['get_column_letter']
+
         wb    = Workbook()
         hfnt  = Font(bold=True, color='FFFFFF')
         hfill = PatternFill('solid', fgColor='2C3E50')
@@ -3369,7 +5018,9 @@ class FloodRoutingApp(ctk.CTk):
 
             s6 = {}
             for key in ('DT_MIN', 'TR_MIN', 'NQ'):
-                try: s6[key] = float(self._entries[key].get())
+                try:
+                    val = self._entries[key].get()
+                    s6[key] = int(float(val)) if key == 'NQ' else float(val)
                 except Exception: pass
             s6['huff']       = self._huff_var.get()
             s6['operations'] = copy.deepcopy(self.operations)
