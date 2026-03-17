@@ -40,6 +40,9 @@ class HydroAnalysisApp(ctk.CTk):
         # 윈도우 타이틀바 색상을 다크모드로 강제 변경
         self.change_title_bar_color()
 
+        # 종료 시 after() 콜백 잔재로 생기는 bgerror 콘솔 메시지 억제
+        self.tk.eval('proc bgerror {msg} {}')
+
         # 2. 기본 경로 및 변수 설정
         self.base_path = os.path.dirname(os.path.abspath(__file__))
         self.projects_root_folder = os.path.join(self.base_path, "0.Projects")
@@ -259,7 +262,8 @@ class HydroAnalysisApp(ctk.CTk):
 
         try:
             cmd = [sys.executable, script_name, self.current_project_path, input_file_path]
-            subprocess.Popen(cmd, cwd=os.path.join(self.base_path, folder_name))
+            subprocess.Popen(cmd, cwd=os.path.join(self.base_path, folder_name),
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception as e:
             self.log_message(f"실행 중 오류 발생: {e}")
             messagebox.showerror("시스템 오류", str(e))
